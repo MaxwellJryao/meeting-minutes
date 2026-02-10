@@ -29,19 +29,23 @@ concurrency:
 env:
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build-macos-qwen-asr:
     name: Build macOS (Apple Silicon + Qwen3-ASR)
-    runs-on: macos-latest
+    runs-on: macos-14
     permissions:
       contents: write
+      actions: read
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Get version from tauri.conf.json
         id: get-version
@@ -63,13 +67,19 @@ jobs:
             echo "args=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Cache vendor GGML build
+        uses: actions/cache@v4
+        with:
+          path: target/aarch64-apple-darwin/release/build/qwen3-asr-sys-*/out
+          key: ${{ runner.os }}-ggml-vendor-${{ hashFiles('frontend/src-tauri/qwen3-asr-sys/build.rs', 'frontend/src-tauri/qwen3-asr-sys/qwen3_asr_c.cpp') }}
+          restore-keys: |
+            ${{ runner.os }}-ggml-vendor-
+
       - name: Clone qwen3-asr.cpp vendor library
         run: |
           cd frontend/src-tauri/qwen3-asr-sys/vendor
-          git clone --recursive https://github.com/predict-woo/qwen3-asr.cpp
-          echo "Vendor library cloned with GGML submodule"
-          ls -la qwen3-asr.cpp/
-          ls -la qwen3-asr.cpp/ggml/
+          git clone --depth 1 --recursive --shallow-submodules https://github.com/predict-woo/qwen3-asr.cpp
+          echo "Vendor library cloned (shallow)"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -100,16 +110,21 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      - name: Rust cache
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Rust cache (target dir)
         uses: swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
           key: macos-qwen-asr-aarch64
+          cache-targets: true
+          cache-all-crates: true
 
       - name: Install frontend dependencies
         run: |
           cd frontend
-          pnpm install
+          pnpm install --frozen-lockfile
 
       - name: Import Apple Developer Certificate
         if: ${{ github.event.inputs.sign-build == 'true' }}
@@ -179,6 +194,9 @@ jobs:
           projectPath: frontend
           tauriScript: pnpm tauri
           args: --target aarch64-apple-darwin --features qwen-asr --config src-tauri/tauri.conf.unsigned.json ${{ steps.build-profile.outputs.args }}
+
+      - name: Show sccache stats
+        run: sccache --show-stats
 
       - name: Verify build artifacts
         run: |
