@@ -158,9 +158,9 @@ impl QwenAsrEngine {
 
         // Qwen3-ASR model configurations (single GGUF files)
         let model_configs = [
-            ("qwen3-asr-0.6b-q8_0", "qwen3-asr-0.6b-q8_0.gguf", 700, QuantizationType::Q8_0,
+            ("qwen3-asr-0.6b-q8_0", "qwen3-asr-0.6b-q8_0.gguf", 1350, QuantizationType::Q8_0,
              "Fast (Quantized)", "8-bit quantized, best speed/quality balance"),
-            ("qwen3-asr-0.6b-f16", "qwen3-asr-0.6b-f16.gguf", 1300, QuantizationType::F16,
+            ("qwen3-asr-0.6b-f16", "qwen3-asr-0.6b-f16.gguf", 1880, QuantizationType::F16,
              "Accurate (F16)", "Half-precision, highest accuracy"),
         ];
 
@@ -438,7 +438,7 @@ impl QwenAsrEngine {
 
         // HuggingFace URL for Qwen3-ASR GGUF models
         let download_url = format!(
-            "https://huggingface.co/predict-woo/qwen3-asr-0.6b-GGUF/resolve/main/{}",
+            "https://huggingface.co/FlippyDora/qwen3-asr-0.6b-GGUF/resolve/main/{}",
             gguf_filename
         );
 
