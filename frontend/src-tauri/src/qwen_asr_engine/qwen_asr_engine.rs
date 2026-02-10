@@ -214,6 +214,8 @@ impl QwenAsrEngine {
 
     /// Validate GGUF file by checking magic header and minimum size
     async fn validate_gguf_file(&self, file_path: &PathBuf) -> Result<()> {
+        use std::io::Read;
+
         let metadata = std::fs::metadata(file_path)
             .map_err(|e| anyhow!("Failed to read file metadata: {}", e))?;
 
@@ -222,17 +224,17 @@ impl QwenAsrEngine {
             return Err(anyhow!("File too small to be a valid GGUF: {} bytes", metadata.len()));
         }
 
-        // Check GGUF magic header: 0x46475547 ("GGUF" in little-endian)
-        let file_bytes = std::fs::read(file_path)
-            .map_err(|e| anyhow!("Failed to read file: {}", e))?;
+        // Check GGUF magic header: "GGUF" = bytes [0x47, 0x47, 0x55, 0x46]
+        // As little-endian u32: 0x46554747
+        let mut file = std::fs::File::open(file_path)
+            .map_err(|e| anyhow!("Failed to open file: {}", e))?;
+        let mut magic_bytes = [0u8; 4];
+        file.read_exact(&mut magic_bytes)
+            .map_err(|e| anyhow!("Failed to read GGUF header: {}", e))?;
 
-        if file_bytes.len() < 4 {
-            return Err(anyhow!("File too small for GGUF header"));
-        }
-
-        let magic = u32::from_le_bytes([file_bytes[0], file_bytes[1], file_bytes[2], file_bytes[3]]);
-        if magic != 0x46475547 {
-            return Err(anyhow!("Invalid GGUF magic header: 0x{:08X}", magic));
+        let magic = u32::from_le_bytes(magic_bytes);
+        if magic != 0x46554747 {
+            return Err(anyhow!("Invalid GGUF magic header: 0x{:08X} (expected 0x46554747)", magic));
         }
 
         Ok(())

@@ -37,15 +37,19 @@ fn get_models_directory() -> Option<PathBuf> {
 
 #[command]
 pub async fn qwen_asr_init() -> Result<(), String> {
+    log::info!("qwen_asr_init called");
     let mut guard = QWEN_ASR_ENGINE.lock().unwrap();
     if guard.is_some() {
+        log::info!("qwen_asr_init: engine already initialized");
         return Ok(());
     }
 
     let models_dir = get_models_directory();
+    log::info!("qwen_asr_init: models_dir={:?}", models_dir);
     let engine = QwenAsrEngine::new_with_models_dir(models_dir)
         .map_err(|e| format!("Failed to initialize Qwen ASR engine: {}", e))?;
     *guard = Some(Arc::new(engine));
+    log::info!("qwen_asr_init: engine initialized successfully");
     Ok(())
 }
 
@@ -147,9 +151,15 @@ pub async fn qwen_asr_has_available_models() -> Result<bool, String> {
             .await
             .map_err(|e| format!("Failed to discover models: {}", e))?;
 
+        for model in &models {
+            log::info!("qwen_asr_has_available_models: model={}, status={:?}", model.name, model.status);
+        }
+
         let available = models.iter().any(|m| matches!(m.status, ModelStatus::Available));
+        log::info!("qwen_asr_has_available_models: returning {}", available);
         Ok(available)
     } else {
+        log::warn!("qwen_asr_has_available_models: engine not initialized, returning false");
         Ok(false)
     }
 }
