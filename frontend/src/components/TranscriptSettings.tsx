@@ -7,10 +7,11 @@ import { Label } from './ui/label';
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react';
 import { ModelManager } from './WhisperModelManager';
 import { ParakeetModelManager } from './ParakeetModelManager';
+import { QwenAsrModelManager } from './QwenAsrModelManager';
 
 
 export interface TranscriptModelProps {
-    provider: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+    provider: 'localWhisper' | 'parakeet' | 'qwenAsr' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
     model: string;
     apiKey?: string | null;
 }
@@ -28,9 +29,10 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [selectedWhisperModel, setSelectedWhisperModel] = useState<string>(transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : 'small');
     const [selectedParakeetModel, setSelectedParakeetModel] = useState<string>(transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : 'parakeet-tdt-0.6b-v3-int8');
+    const [selectedQwenAsrModel, setSelectedQwenAsrModel] = useState<string>(transcriptModelConfig.provider === 'qwenAsr' ? transcriptModelConfig.model : 'qwen3-asr-0.6b-q8_0');
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet') {
+        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'qwenAsr') {
             setApiKey(null);
         }
     }, [transcriptModelConfig.provider]);
@@ -49,6 +51,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const modelOptions = {
         localWhisper: [selectedWhisperModel],
         parakeet: [selectedParakeetModel],
+        qwenAsr: [selectedQwenAsrModel],
         deepgram: ['nova-2-phonecall'],
         elevenLabs: ['eleven_multilingual_v2'],
         groq: ['llama-3.3-70b-versatile'],
@@ -84,7 +87,19 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                 ...transcriptModelConfig,
                 model: modelName
             });
-            // Close modal after selection
+            if (onModelSelect) {
+                onModelSelect();
+            }
+        }
+    };
+
+    const handleQwenAsrModelSelect = (modelName: string) => {
+        setSelectedQwenAsrModel(modelName);
+        if (transcriptModelConfig.provider === 'qwenAsr') {
+            setTranscriptModelConfig({
+                ...transcriptModelConfig,
+                model: modelName
+            });
             if (onModelSelect) {
                 onModelSelect();
             }
@@ -119,6 +134,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectTrigger>
                                 <SelectContent>
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
+                                    <SelectItem value="qwenAsr">🧠 Qwen3 ASR (Multilingual / Accurate)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
@@ -127,7 +143,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 </SelectContent>
                             </Select>
 
-                            {transcriptModelConfig.provider !== 'localWhisper' && transcriptModelConfig.provider !== 'parakeet' && (
+                            {transcriptModelConfig.provider !== 'localWhisper' && transcriptModelConfig.provider !== 'parakeet' && transcriptModelConfig.provider !== 'qwenAsr' && (
                                 <Select
                                     value={transcriptModelConfig.model}
                                     onValueChange={(value) => {
@@ -169,6 +185,15 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                         </div>
                     )}
 
+                    {transcriptModelConfig.provider === 'qwenAsr' && (
+                        <div className="mt-6">
+                            <QwenAsrModelManager
+                                selectedModel={selectedQwenAsrModel}
+                                onModelSelect={handleQwenAsrModelSelect}
+                                autoSave={true}
+                            />
+                        </div>
+                    )}
 
                     {requiresApiKey && (
                         <div>

@@ -81,6 +81,7 @@ pub fn start_transcription_task<R: Runtime>(
             let engine_clone = match &transcription_engine {
                 TranscriptionEngine::Whisper(e) => TranscriptionEngine::Whisper(e.clone()),
                 TranscriptionEngine::Parakeet(e) => TranscriptionEngine::Parakeet(e.clone()),
+                TranscriptionEngine::QwenAsr(e) => TranscriptionEngine::QwenAsr(e.clone()),
                 TranscriptionEngine::Provider(p) => TranscriptionEngine::Provider(p.clone()),
             };
             let app_clone = app.clone();
@@ -156,6 +157,7 @@ pub fn start_transcription_task<R: Runtime>(
                                     let confidence_threshold = match &engine_clone {
                                         TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) => 0.3,
                                         TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
+                                        TranscriptionEngine::QwenAsr(_) => 0.0,  // QwenASR has no confidence, accept all
                                     };
 
                                     let confidence_str = match confidence_opt {
@@ -521,8 +523,81 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 }
             }
         }
+        TranscriptionEngine::QwenAsr(qwen_engine) => {
+            // Use streaming transcription to emit partial results token-by-token
+            let app_for_streaming = app.clone();
+            let chunk_id = chunk.chunk_id;
+            let chunk_ts = chunk.timestamp;
+            let chunk_dur = speech_samples.len() as f64 / 16000.0;
+            let partial_buffer = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let partial_buffer_clone = partial_buffer.clone();
+            let token_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let token_count_clone = token_count.clone();
+
+            let on_token = move |token: &str| -> bool {
+                let mut buf = partial_buffer_clone.lock().unwrap();
+                buf.push_str(token);
+                let count = token_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                // Emit partial transcript every 5 tokens for smooth UI updates
+                if count % 5 == 4 {
+                    let partial_text = buf.trim().to_string();
+                    if !partial_text.is_empty() {
+                        let partial_update = TranscriptUpdate {
+                            text: partial_text,
+                            timestamp: format_current_timestamp(),
+                            source: "Audio".to_string(),
+                            sequence_id: 0, // Partial updates use 0; final gets real ID
+                            chunk_start_time: chunk_ts,
+                            is_partial: true,
+                            confidence: 0.0,
+                            audio_start_time: chunk_ts,
+                            audio_end_time: chunk_ts + chunk_dur,
+                            duration: chunk_dur,
+                        };
+                        let _ = app_for_streaming.emit("transcript-update", &partial_update);
+                    }
+                }
+                true // continue decoding
+            };
+
+            match qwen_engine.transcribe_audio_streaming(speech_samples, on_token).await {
+                Ok(text) => {
+                    let cleaned_text = text.trim().to_string();
+                    if cleaned_text.is_empty() {
+                        return Ok((String::new(), None, false));
+                    }
+
+                    info!(
+                        "QwenASR transcription complete for chunk {}: '{}'",
+                        chunk_id, cleaned_text
+                    );
+
+                    // Final result (non-partial)
+                    Ok((cleaned_text, None, false))
+                }
+                Err(e) => {
+                    error!(
+                        "QwenASR transcription failed for chunk {}: {}",
+                        chunk_id, e
+                    );
+
+                    let transcription_error = TranscriptionError::EngineFailed(e.to_string());
+                    let _ = app.emit(
+                        "transcription-error",
+                        &serde_json::json!({
+                            "error": transcription_error.to_string(),
+                            "userMessage": format!("Transcription failed: {}", transcription_error),
+                            "actionable": false
+                        }),
+                    );
+
+                    Err(transcription_error)
+                }
+            }
+        }
         TranscriptionEngine::Provider(provider) => {
-            // NEW: Trait-based provider (clean, unified interface)
+            // Trait-based provider (clean, unified interface)
             let language = crate::get_language_preference_internal();
 
             match provider.transcribe(speech_samples, language).await {

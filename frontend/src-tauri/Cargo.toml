@@ -52,6 +52,11 @@ hipblas = ["whisper-rs/hipblas"]   # Linux: AMD ROCm HIP
 openblas = ["whisper-rs/openblas"] # Optimized BLAS (Auto-enabled on Windows/Linux)
 openmp = ["whisper-rs/openmp"]     # OpenMP parallel processing
 
+# Qwen3-ASR (GGML-based multilingual ASR)
+qwen-asr = ["qwen3-asr-sys"]
+qwen-asr-metal = ["qwen-asr", "qwen3-asr-sys/metal"]
+qwen-asr-cuda = ["qwen-asr", "qwen3-asr-sys/cuda"]
+
 [build-dependencies]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
@@ -102,6 +107,9 @@ silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", 
 # Parakeet (ONNX-based fast transcription) dependencies
 ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models
 thiserror = "2.0.16"                # Error handling for Parakeet
+
+# Qwen3-ASR (GGML-based multilingual ASR) - optional
+qwen3-asr-sys = { path = "qwen3-asr-sys", optional = true }
 
 # Async
 tokio = { version = "1.32.0", features = ["full", "tracing"] }
