@@ -167,19 +167,18 @@ jobs:
           projectPath: frontend
           args: --target aarch64-apple-darwin --features qwen-asr ${{ steps.build-profile.outputs.args }}
 
-      - name: Build Tauri app with Qwen3-ASR (unsigned)
+      - name: Build Tauri app with Qwen3-ASR (unsigned, no updater signing)
         if: ${{ github.event.inputs.sign-build != 'true' }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           MEETILY_RSA_PUBLIC_KEY: ${{ secrets.MEETILY_RSA_PUBLIC_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         with:
           projectPath: frontend
-          args: --target aarch64-apple-darwin --features qwen-asr ${{ steps.build-profile.outputs.args }}
+          tauriScript: pnpm tauri
+          args: --target aarch64-apple-darwin --features qwen-asr --config src-tauri/tauri.conf.unsigned.json ${{ steps.build-profile.outputs.args }}
 
       - name: Verify build artifacts
         run: |
