@@ -13,8 +13,10 @@ pub struct QwenAsrModel {
 }
 
 // SAFETY: The C library is designed for single-threaded access per context.
-// We protect with Mutex/RwLock at the engine level.
+// We protect with Mutex/RwLock at the engine level, ensuring only one thread
+// accesses the context at a time.
 unsafe impl Send for QwenAsrModel {}
+unsafe impl Sync for QwenAsrModel {}
 
 impl QwenAsrModel {
     /// Create a new QwenAsrModel and load a GGUF model file.
