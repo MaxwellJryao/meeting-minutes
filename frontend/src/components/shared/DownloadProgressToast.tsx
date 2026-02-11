@@ -145,6 +145,8 @@ export function useDownloadProgressToast() {
   const cleanupDownload = useCallback((modelName: string, delay: number = 4000) => {
     // Remove download from map after delay (allows toast to show and auto-dismiss)
     setTimeout(() => {
+      const toastId = `download-${modelName}`;
+      toast.dismiss(toastId);
       setDownloads((prev) => {
         const updated = new Map(prev);
         updated.delete(modelName);
