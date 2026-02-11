@@ -4,8 +4,8 @@
 
 use super::provider::{TranscriptionError, TranscriptionProvider, TranscriptResult};
 use async_trait::async_trait;
-use log::warn;
-use std::sync::Arc;
+use regex::Regex;
+use std::sync::{Arc, LazyLock};
 
 /// Qwen3-ASR transcription provider (wraps QwenAsrEngine)
 pub struct QwenAsrProvider {
@@ -16,6 +16,35 @@ impl QwenAsrProvider {
     pub fn new(engine: Arc<crate::qwen_asr_engine::QwenAsrEngine>) -> Self {
         Self { engine }
     }
+}
+
+fn clean_qwen_asr_output(text: &str) -> String {
+    static LANGUAGE_LINE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?im)^\s*language\s+[^\s:：]+[:：]?\s*").expect("valid regex")
+    });
+    static LANGUAGE_SENTENCE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)([。！？.!?]\s*)language\s+[^\s:：]+[:：]?\s*").expect("valid regex")
+    });
+    static MULTISPACE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[ \t]{2,}").expect("valid regex"));
+
+    let mut cleaned = text.trim().to_string();
+    if cleaned.is_empty() {
+        return cleaned;
+    }
+
+    cleaned = LANGUAGE_LINE_PREFIX_RE.replace_all(&cleaned, "").into_owned();
+    loop {
+        let next = LANGUAGE_SENTENCE_PREFIX_RE
+            .replace_all(&cleaned, "$1")
+            .into_owned();
+        if next == cleaned {
+            break;
+        }
+        cleaned = next;
+    }
+    cleaned = MULTISPACE_RE.replace_all(&cleaned, " ").into_owned();
+    cleaned.trim().to_string()
 }
 
 #[async_trait]
@@ -32,7 +61,7 @@ impl TranscriptionProvider for QwenAsrProvider {
 
         match self.engine.transcribe_audio(audio).await {
             Ok(text) => Ok(TranscriptResult {
-                text: text.trim().to_string(),
+                text: clean_qwen_asr_output(&text),
                 confidence: None, // Qwen3-ASR doesn't provide confidence scores
                 is_partial: false,
             }),
