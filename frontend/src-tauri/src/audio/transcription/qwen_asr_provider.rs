@@ -19,11 +19,31 @@ impl QwenAsrProvider {
 }
 
 fn clean_qwen_asr_output(text: &str) -> String {
-    static LANGUAGE_LINE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?im)^\s*language\s+[^\s:：]+[:：]?\s*").expect("valid regex")
+    static LANGUAGE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?im)^\s*language\s+(?:",
+            r"English|Chinese|Japanese|Korean|French|German|Spanish|",
+            r"Portuguese|Russian|Italian|Dutch|Turkish|Arabic|Polish|",
+            r"Swedish|Norwegian|Danish|Finnish|Hungarian|Czech|Romanian|",
+            r"Bulgarian|Greek|Serbian|Croatian|Slovak|Slovenian|",
+            r"Ukrainian|Catalan|Vietnamese|Thai|Indonesian|Malay|",
+            r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
+            r"Cantonese|Yue|None|null",
+            r")[:：]?\s*"
+        )).expect("valid regex")
     });
     static LANGUAGE_SENTENCE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)([。！？.!?]\s*)language\s+[^\s:：]+[:：]?\s*").expect("valid regex")
+        Regex::new(concat!(
+            r"(?i)([。！？.!?]\s*)language\s+(?:",
+            r"English|Chinese|Japanese|Korean|French|German|Spanish|",
+            r"Portuguese|Russian|Italian|Dutch|Turkish|Arabic|Polish|",
+            r"Swedish|Norwegian|Danish|Finnish|Hungarian|Czech|Romanian|",
+            r"Bulgarian|Greek|Serbian|Croatian|Slovak|Slovenian|",
+            r"Ukrainian|Catalan|Vietnamese|Thai|Indonesian|Malay|",
+            r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
+            r"Cantonese|Yue|None|null",
+            r")[:：]?\s*"
+        )).expect("valid regex")
     });
     static MULTISPACE_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"[ \t]{2,}").expect("valid regex"));
@@ -33,7 +53,7 @@ fn clean_qwen_asr_output(text: &str) -> String {
         return cleaned;
     }
 
-    cleaned = LANGUAGE_LINE_PREFIX_RE.replace_all(&cleaned, "").into_owned();
+    cleaned = LANGUAGE_PREFIX_RE.replace_all(&cleaned, "").into_owned();
     loop {
         let next = LANGUAGE_SENTENCE_PREFIX_RE
             .replace_all(&cleaned, "$1")

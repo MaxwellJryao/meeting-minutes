@@ -564,8 +564,13 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
 
             match qwen_engine.transcribe_audio_streaming(speech_samples, on_token).await {
                 Ok(text) => {
+                    info!(
+                        "QwenASR raw output for chunk {}: '{}'",
+                        chunk_id, text
+                    );
                     let cleaned_text = clean_qwen_asr_output(&text);
                     if cleaned_text.is_empty() {
+                        info!("QwenASR chunk {} cleaned to empty (raw was '{}'), skipping", chunk_id, text);
                         return Ok((String::new(), None, false));
                     }
 
@@ -648,14 +653,42 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
     }
 }
 
-/// Remove QwenASR language-prefix artifacts like "language None" or "language en"
-/// while preserving actual speech content.
+/// Remove QwenASR language-prefix artifacts.
+///
+/// Qwen3-ASR prepends a language tag directly before the transcript with NO separator:
+///   - `language EnglishWhat's your name?`
+///   - `language Chinese吃吃吃。`
+///   - `language None Hello`
+///
+/// We match the known language names exactly to avoid eating transcript content.
 fn clean_qwen_asr_output(text: &str) -> String {
-    static LANGUAGE_LINE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?im)^\s*language\s+[^\s:：]+[:：]?\s*").expect("valid regex")
+    // Known Qwen3-ASR language names (case-insensitive).
+    // These are directly concatenated to the transcript without any separator.
+    static LANGUAGE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?im)^\s*language\s+(?:",
+            r"English|Chinese|Japanese|Korean|French|German|Spanish|",
+            r"Portuguese|Russian|Italian|Dutch|Turkish|Arabic|Polish|",
+            r"Swedish|Norwegian|Danish|Finnish|Hungarian|Czech|Romanian|",
+            r"Bulgarian|Greek|Serbian|Croatian|Slovak|Slovenian|",
+            r"Ukrainian|Catalan|Vietnamese|Thai|Indonesian|Malay|",
+            r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
+            r"Cantonese|Yue|None|null",
+            r")[:：]?\s*"
+        )).expect("valid regex")
     });
     static LANGUAGE_SENTENCE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?i)([。！？.!?]\s*)language\s+[^\s:：]+[:：]?\s*").expect("valid regex")
+        Regex::new(concat!(
+            r"(?i)([。！？.!?]\s*)language\s+(?:",
+            r"English|Chinese|Japanese|Korean|French|German|Spanish|",
+            r"Portuguese|Russian|Italian|Dutch|Turkish|Arabic|Polish|",
+            r"Swedish|Norwegian|Danish|Finnish|Hungarian|Czech|Romanian|",
+            r"Bulgarian|Greek|Serbian|Croatian|Slovak|Slovenian|",
+            r"Ukrainian|Catalan|Vietnamese|Thai|Indonesian|Malay|",
+            r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
+            r"Cantonese|Yue|None|null",
+            r")[:：]?\s*"
+        )).expect("valid regex")
     });
     static MULTISPACE_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"[ \t]{2,}").expect("valid regex"));
@@ -665,7 +698,7 @@ fn clean_qwen_asr_output(text: &str) -> String {
         return cleaned;
     }
 
-    cleaned = LANGUAGE_LINE_PREFIX_RE.replace_all(&cleaned, "").into_owned();
+    cleaned = LANGUAGE_PREFIX_RE.replace_all(&cleaned, "").into_owned();
     loop {
         let next = LANGUAGE_SENTENCE_PREFIX_RE
             .replace_all(&cleaned, "$1")

@@ -26,6 +26,9 @@ pub struct ContinuousVadProcessor {
     speech_start_sample: usize,
     // State tracking for smart logging
     last_logged_state: bool,
+    /// Maximum speech duration in samples before forcing a segment split.
+    /// Prevents unbounded accumulation when speech is continuous.
+    max_speech_samples: usize,
 }
 
 impl ContinuousVadProcessor {
@@ -67,6 +70,14 @@ impl ContinuousVadProcessor {
         info!("VAD processor created: input={}Hz, vad={}Hz, chunk_size={} samples",
               input_sample_rate, VAD_SAMPLE_RATE, vad_chunk_size);
 
+        // Force-split long continuous speech to keep transcription latency low.
+        // 10 seconds at 16kHz (VAD always operates at 16kHz internally).
+        const MAX_SPEECH_DURATION_SEC: usize = 10;
+        let max_speech_samples = MAX_SPEECH_DURATION_SEC * 16000;
+
+        info!("VAD processor: max_speech_duration={}s ({}  samples at 16kHz)",
+              MAX_SPEECH_DURATION_SEC, max_speech_samples);
+
         Ok(Self {
             session,
             chunk_size: vad_chunk_size,
@@ -79,6 +90,7 @@ impl ContinuousVadProcessor {
             speech_start_sample: 0,
             // Initialize state tracking
             last_logged_state: false,
+            max_speech_samples,
         })
     }
 
@@ -256,6 +268,29 @@ impl ContinuousVadProcessor {
         // Accumulate speech if we're currently in a speech state
         if self.in_speech {
             self.current_speech.extend_from_slice(chunk);
+
+            // Force-split if speech exceeds max duration to keep transcription latency low.
+            // This emits the accumulated segment immediately and starts a new one,
+            // without resetting the VAD state (speech continues seamlessly).
+            if self.current_speech.len() >= self.max_speech_samples {
+                let start_ms = (self.speech_start_sample as f64 / self.sample_rate as f64) * 1000.0;
+                let end_ms = (self.processed_samples as f64 / self.sample_rate as f64) * 1000.0;
+
+                info!("VAD: Force-splitting long speech segment at {}ms (duration: {:.0}ms, {} samples)",
+                      end_ms, end_ms - start_ms, self.current_speech.len());
+
+                let segment = SpeechSegment {
+                    samples: self.current_speech.clone(),
+                    start_timestamp_ms: start_ms,
+                    end_timestamp_ms: end_ms,
+                    confidence: 0.85,
+                };
+                self.speech_segments.push_back(segment);
+
+                // Reset for next segment but stay in speech state
+                self.current_speech.clear();
+                self.speech_start_sample = self.processed_samples;
+            }
         }
 
         self.processed_samples += chunk.len();
