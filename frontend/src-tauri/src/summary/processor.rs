@@ -212,7 +212,7 @@ pub async fn generate_meeting_summary(
         info!("Split transcript into {} chunks", num_chunks);
 
         let mut chunk_summaries = Vec::new();
-        let system_prompt_chunk = "You are an expert meeting summarizer.";
+        let system_prompt_chunk = "You are an expert meeting summarizer. When summarizing, fix obvious speech recognition errors (homophones, near-sound substitutions) using context before including them in your summary.";
         let user_prompt_template_chunk = "Provide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals.\n\n<transcript_chunk>\n{}\n</transcript_chunk>";
 
         for (i, chunk) in chunks.iter().enumerate() {
@@ -323,6 +323,7 @@ pub async fn generate_meeting_summary(
 4. If a section has no relevant info, write "None noted in this section."
 5. Output **only** the completed Markdown report.
 6. If unsure about something, omit it.
+7. Fix obvious speech recognition errors in the transcript before summarizing (e.g. homophones, near-sound substitutions like "腰" → "要", "公司" misrecognized as "攻丝"). Use surrounding context to determine the correct word.
 
 **SECTION-SPECIFIC INSTRUCTIONS:**
 {}
