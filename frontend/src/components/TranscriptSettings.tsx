@@ -29,7 +29,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [selectedWhisperModel, setSelectedWhisperModel] = useState<string>(transcriptModelConfig.provider === 'localWhisper' ? transcriptModelConfig.model : 'small');
     const [selectedParakeetModel, setSelectedParakeetModel] = useState<string>(transcriptModelConfig.provider === 'parakeet' ? transcriptModelConfig.model : 'parakeet-tdt-0.6b-v3-int8');
-    const [selectedQwenAsrModel, setSelectedQwenAsrModel] = useState<string>(transcriptModelConfig.provider === 'qwenAsr' ? transcriptModelConfig.model : 'qwen3-asr-0.6b-q8_0');
+    const [selectedQwenAsrModel, setSelectedQwenAsrModel] = useState<string>(transcriptModelConfig.provider === 'qwenAsr' ? transcriptModelConfig.model : 'qwen3-asr-1.7b-q8_0');
 
     useEffect(() => {
         if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'qwenAsr') {
@@ -246,7 +246,6 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
         </div>
     )
 }
-
 
 
 

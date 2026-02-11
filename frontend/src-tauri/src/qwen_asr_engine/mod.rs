@@ -1,8 +1,8 @@
 //! Qwen3-ASR speech recognition engine module.
 //!
 //! This module provides multilingual speech-to-text transcription using the
-//! Qwen3-ASR-1.7B model via GGML (qwen3-asr.cpp). It supports both batch
-//! and streaming inference modes.
+//! Qwen3-ASR models (1.7B / 0.6B) via GGML (qwen3-asr.cpp). It supports both
+//! batch and streaming inference modes.
 //!
 //! # Features
 //!

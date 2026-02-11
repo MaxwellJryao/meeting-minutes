@@ -29,16 +29,26 @@ export interface QwenAsrModelDisplayInfo {
 }
 
 export const QWEN_ASR_MODEL_DISPLAY_CONFIG: Record<string, QwenAsrModelDisplayInfo> = {
+  'qwen3-asr-1.7b-q8_0': {
+    friendlyName: 'Qwen3 ASR 1.7B (Q8)',
+    icon: '🧠',
+    tagline: 'Multilingual • 1.7B • Recommended quality/speed balance',
+    recommended: true,
+  },
+  'qwen3-asr-1.7b-f16': {
+    friendlyName: 'Qwen3 ASR 1.7B (F16)',
+    icon: '🎯',
+    tagline: 'Multilingual • 1.7B • Highest accuracy',
+  },
   'qwen3-asr-0.6b-q8_0': {
     friendlyName: 'Qwen3 ASR 0.6B (Q8)',
-    icon: '🧠',
-    tagline: 'Multilingual • 8-bit quantized • Best speed/quality balance',
-    recommended: true,
+    icon: '⚡',
+    tagline: 'Multilingual • 0.6B • Faster and lighter',
   },
   'qwen3-asr-0.6b-f16': {
     friendlyName: 'Qwen3 ASR 0.6B (F16)',
-    icon: '🎯',
-    tagline: 'Multilingual • Half-precision • Highest accuracy',
+    icon: '📦',
+    tagline: 'Multilingual • 0.6B • Higher quality than 0.6B Q8',
   },
 };
 

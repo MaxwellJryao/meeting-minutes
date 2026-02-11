@@ -11,7 +11,7 @@ use tokio::sync::RwLock;
 use tokio::time::timeout;
 
 /// Quantization type for Qwen ASR models (GGUF)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum QuantizationType {
     F16,  // Half precision
     Q8_0, // 8-bit quantization (recommended)
@@ -105,6 +105,56 @@ impl From<std::io::Error> for QwenAsrEngineError {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ModelConfig {
+    name: &'static str,
+    filename: &'static str,
+    size_mb: u32,
+    quantization: QuantizationType,
+    speed: &'static str,
+    description: &'static str,
+    huggingface_repo: &'static str,
+}
+
+const MODEL_CONFIGS: [ModelConfig; 4] = [
+    ModelConfig {
+        name: "qwen3-asr-1.7b-q8_0",
+        filename: "qwen3-asr-1.7b-q8_0.gguf",
+        size_mb: 3000,
+        quantization: QuantizationType::Q8_0,
+        speed: "Recommended (Q8)",
+        description: "1.7B multilingual model, best quality/speed balance",
+        huggingface_repo: "FlippyDora/qwen3-asr-1.7b-GGUF",
+    },
+    ModelConfig {
+        name: "qwen3-asr-1.7b-f16",
+        filename: "qwen3-asr-1.7b-f16.gguf",
+        size_mb: 4200,
+        quantization: QuantizationType::F16,
+        speed: "Best Quality (F16)",
+        description: "1.7B multilingual model, highest accuracy",
+        huggingface_repo: "FlippyDora/qwen3-asr-1.7b-GGUF",
+    },
+    ModelConfig {
+        name: "qwen3-asr-0.6b-q8_0",
+        filename: "qwen3-asr-0.6b-q8_0.gguf",
+        size_mb: 1350,
+        quantization: QuantizationType::Q8_0,
+        speed: "Fast (Q8)",
+        description: "0.6B multilingual model, best speed/quality balance",
+        huggingface_repo: "FlippyDora/qwen3-asr-0.6b-GGUF",
+    },
+    ModelConfig {
+        name: "qwen3-asr-0.6b-f16",
+        filename: "qwen3-asr-0.6b-f16.gguf",
+        size_mb: 1880,
+        quantization: QuantizationType::F16,
+        speed: "Accurate (F16)",
+        description: "0.6B multilingual model, higher accuracy",
+        huggingface_repo: "FlippyDora/qwen3-asr-0.6b-GGUF",
+    },
+];
+
 pub struct QwenAsrEngine {
     models_dir: PathBuf,
     current_model: Arc<RwLock<Option<QwenAsrModel>>>,
@@ -115,6 +165,16 @@ pub struct QwenAsrEngine {
 }
 
 impl QwenAsrEngine {
+    fn model_configs() -> &'static [ModelConfig] {
+        &MODEL_CONFIGS
+    }
+
+    fn get_model_config(model_name: &str) -> Option<&'static ModelConfig> {
+        Self::model_configs()
+            .iter()
+            .find(|config| config.name == model_name)
+    }
+
     /// Create a new Qwen ASR engine with optional custom models directory
     pub fn new_with_models_dir(models_dir: Option<PathBuf>) -> Result<Self> {
         let models_dir = if let Some(dir) = models_dir {
@@ -156,32 +216,24 @@ impl QwenAsrEngine {
         let models_dir = &self.models_dir;
         let mut models = Vec::new();
 
-        // Qwen3-ASR model configurations (single GGUF files)
-        let model_configs = [
-            ("qwen3-asr-0.6b-q8_0", "qwen3-asr-0.6b-q8_0.gguf", 1350, QuantizationType::Q8_0,
-             "Fast (Quantized)", "8-bit quantized, best speed/quality balance"),
-            ("qwen3-asr-0.6b-f16", "qwen3-asr-0.6b-f16.gguf", 1880, QuantizationType::F16,
-             "Accurate (F16)", "Half-precision, highest accuracy"),
-        ];
-
         let active_downloads = self.active_downloads.read().await;
 
-        for (name, filename, size_mb, quantization, speed, description) in model_configs {
-            let model_path = models_dir.join(filename);
+        for config in Self::model_configs() {
+            let model_path = models_dir.join(config.filename);
 
-            let status = if active_downloads.contains(name) {
+            let status = if active_downloads.contains(config.name) {
                 ModelStatus::Downloading { progress: 0 }
             } else if model_path.exists() {
                 match self.validate_gguf_file(&model_path).await {
                     Ok(_) => ModelStatus::Available,
                     Err(_) => {
-                        log::warn!("GGUF file {} appears corrupted", filename);
+                        log::warn!("GGUF file {} appears corrupted", config.filename);
                         let file_size = std::fs::metadata(&model_path)
                             .map(|m| m.len())
                             .unwrap_or(0);
                         ModelStatus::Corrupted {
                             file_size,
-                            expected_min_size: (size_mb as u64) * 1024 * 1024,
+                            expected_min_size: (config.size_mb as u64) * 1024 * 1024,
                         }
                     }
                 }
@@ -190,13 +242,13 @@ impl QwenAsrEngine {
             };
 
             let model_info = ModelInfo {
-                name: name.to_string(),
+                name: config.name.to_string(),
                 path: model_path,
-                size_mb: size_mb as u32,
-                quantization: quantization.clone(),
-                speed: speed.to_string(),
+                size_mb: config.size_mb,
+                quantization: config.quantization,
+                speed: config.speed.to_string(),
                 status,
-                description: description.to_string(),
+                description: config.description.to_string(),
             };
 
             models.push(model_info);
@@ -432,19 +484,23 @@ impl QwenAsrEngine {
             }
         }
 
-        // Determine GGUF filename and download URL
-        let gguf_filename = match model_info.quantization {
-            QuantizationType::Q8_0 => "qwen3-asr-0.6b-q8_0.gguf",
-            QuantizationType::F16 => "qwen3-asr-0.6b-f16.gguf",
+        let model_config = match Self::get_model_config(model_name) {
+            Some(config) => config,
+            None => {
+                let mut active = self.active_downloads.write().await;
+                active.remove(model_name);
+                return Err(anyhow!("Unsupported model: {}", model_name));
+            }
         };
 
         // HuggingFace URL for Qwen3-ASR GGUF models
         let download_url = format!(
-            "https://huggingface.co/FlippyDora/qwen3-asr-0.6b-GGUF/resolve/main/{}",
-            gguf_filename
+            "https://huggingface.co/{}/resolve/main/{}",
+            model_config.huggingface_repo,
+            model_config.filename
         );
 
-        let file_path = self.models_dir.join(gguf_filename);
+        let file_path = self.models_dir.join(model_config.filename);
 
         // Create models directory if needed
         if !self.models_dir.exists() {
