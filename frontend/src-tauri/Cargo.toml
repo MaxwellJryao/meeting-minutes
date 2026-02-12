@@ -1,6 +1,6 @@
 [package]
 name = "meetily"
-version = "0.2.0"
+version = "0.2.1"
 description = "A Tauri App for meeting minutes"
 authors = ["Sujith S"]
 license = "MIT"
@@ -61,6 +61,9 @@ qwen-asr-cuda = ["qwen-asr", "qwen3-asr-sys/cuda"]
 tauri-build = { version = "2.3.0", features = [] }
 reqwest = { version = "0.11", features = ["blocking", "multipart", "json", "stream"] }
 which = "6.0.1"
+zip = "2.2"           # ZIP extraction (Windows, macOS)
+tar = "0.4"           # TAR extraction (Linux)
+xz2 = "0.1"           # XZ decompression (Linux)
 
 
 [dependencies]
