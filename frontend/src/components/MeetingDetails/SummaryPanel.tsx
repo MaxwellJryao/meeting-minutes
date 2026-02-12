@@ -164,6 +164,9 @@ export function SummaryPanel({
               availableTemplates={availableTemplates}
               selectedTemplate={selectedTemplate}
               onTemplateSelect={onTemplateSelect}
+              onFetchTemplateDetails={onFetchTemplateDetails}
+              onSaveTemplate={onSaveTemplate}
+              onDeleteTemplate={onDeleteTemplate}
               hasTranscripts={transcripts.length > 0}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={onOpenModelSettings}
@@ -192,6 +195,9 @@ export function SummaryPanel({
               availableTemplates={availableTemplates}
               selectedTemplate={selectedTemplate}
               onTemplateSelect={onTemplateSelect}
+              onFetchTemplateDetails={onFetchTemplateDetails}
+              onSaveTemplate={onSaveTemplate}
+              onDeleteTemplate={onDeleteTemplate}
               hasTranscripts={transcripts.length > 0}
               isModelConfigLoading={isModelConfigLoading}
               onOpenModelSettings={onOpenModelSettings}
