@@ -18,6 +18,7 @@ export function PreferenceSettings() {
   } = useConfig();
 
   const [notificationsEnabled, setNotificationsEnabled] = useState<boolean | null>(null);
+  const [meetingDetectionEnabled, setMeetingDetectionEnabled] = useState<boolean>(true);
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
   const hasTrackedViewRef = useRef(false);
@@ -27,6 +28,11 @@ export function PreferenceSettings() {
     loadPreferences();
     // Reset tracking ref on mount (every tab visit)
     hasTrackedViewRef.current = false;
+
+    // Load meeting detection state
+    invoke<boolean>('get_meeting_detection_enabled')
+      .then(setMeetingDetectionEnabled)
+      .catch(() => setMeetingDetectionEnabled(true));
   }, [loadPreferences]);
 
   // Track preferences viewed analytics on every tab visit (once per mount)
@@ -110,6 +116,15 @@ export function PreferenceSettings() {
     handleUpdateNotificationSettings();
   }, [notificationsEnabled, notificationSettings, isInitialLoad, previousNotificationsEnabled, updateNotificationSettings])
 
+  const handleMeetingDetectionChange = async (enabled: boolean) => {
+    setMeetingDetectionEnabled(enabled);
+    try {
+      await invoke('set_meeting_detection_enabled', { enabled });
+    } catch (error) {
+      console.error('Failed to update meeting detection setting:', error);
+    }
+  };
+
   const handleOpenFolder = async (folderType: 'database' | 'models' | 'recordings') => {
     try {
       switch (folderType) {
@@ -156,6 +171,17 @@ export function PreferenceSettings() {
             <p className="text-sm text-gray-600">Enable or disable notifications of start and end of meeting</p>
           </div>
           <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
+        </div>
+      </div>
+
+      {/* Meeting App Detection Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-gray-900 mb-2">Auto-detect Meeting Apps</h3>
+            <p className="text-sm text-gray-600">Show a notification when Zoom, Teams, or other meeting apps are running</p>
+          </div>
+          <Switch checked={meetingDetectionEnabled} onCheckedChange={handleMeetingDetectionChange} />
         </div>
       </div>
 

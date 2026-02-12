@@ -40,6 +40,7 @@ pub mod api;
 pub mod audio;
 pub mod console_utils;
 pub mod database;
+pub mod meeting_detector;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -410,6 +411,7 @@ pub fn run() {
         .manage(Arc::new(RwLock::new(
             None::<notifications::manager::NotificationManager<tauri::Wry>>,
         )) as NotificationManagerState<tauri::Wry>)
+        .manage(meeting_detector::MeetingDetectionState::new())
         .manage(audio::init_system_audio_state())
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
@@ -503,6 +505,9 @@ pub fn run() {
                 database::setup::initialize_database_on_startup(&_app.handle()).await
             })
             .expect("Failed to initialize database");
+
+            // Start meeting app detection loop
+            meeting_detector::start_detection_loop(_app.handle().clone());
 
             // Initialize bundled templates directory for dynamic template discovery
             log::info!("Initializing bundled templates directory...");
@@ -697,6 +702,11 @@ pub fn run() {
             // Language preference commands
             get_language_preference,
             set_language_preference,
+            // Meeting detection commands
+            meeting_detector::set_meeting_detection_enabled,
+            meeting_detector::get_meeting_detection_enabled,
+            meeting_detector::dismiss_meeting_banner,
+            meeting_detector::accept_meeting_banner,
             // Notification system commands
             notifications::commands::get_notification_settings,
             notifications::commands::set_notification_settings,

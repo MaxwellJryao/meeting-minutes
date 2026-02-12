@@ -21,6 +21,7 @@ import { OnboardingFlow } from '@/components/onboarding'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
+import { usePathname } from 'next/navigation'
 
 const sourceSans3 = Source_Sans_3({
   subsets: ['latin'],
@@ -35,10 +36,14 @@ export default function RootLayout({
 }: {
   children: React.ReactNode
 }) {
+  const pathname = usePathname()
+  const isBannerWindow = pathname === '/meeting-banner'
+
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [onboardingCompleted, setOnboardingCompleted] = useState(false)
 
   useEffect(() => {
+    if (isBannerWindow) return // Skip onboarding check for banner
     // Check onboarding status first
     invoke<{ completed: boolean } | null>('get_onboarding_status')
       .then((status) => {
@@ -95,6 +100,17 @@ export default function RootLayout({
     setOnboardingCompleted(true)
     // Optionally reload the window to ensure all state is fresh
     window.location.reload()
+  }
+
+  // Banner popup window: render children directly without providers/sidebar
+  if (isBannerWindow) {
+    return (
+      <html lang="en">
+        <body className={`${sourceSans3.variable} font-sans antialiased`} style={{ background: 'transparent' }}>
+          {children}
+        </body>
+      </html>
+    )
   }
 
   return (
