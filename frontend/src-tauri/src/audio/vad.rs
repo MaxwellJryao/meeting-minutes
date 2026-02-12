@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
-use silero_rs::{VadConfig, VadSession, VadTransition};
 use log::{debug, info};
+use silero_rs::{VadConfig, VadSession, VadTransition};
 use std::collections::VecDeque;
 use std::time::Duration;
 
@@ -17,7 +17,10 @@ pub struct SpeechSegment {
 pub struct ContinuousVadProcessor {
     session: VadSession,
     chunk_size: usize,
-    sample_rate: u32,
+    /// Original input sample rate (device/mixer rate), used for resampling.
+    input_sample_rate: u32,
+    /// Internal VAD processing sample rate (always 16kHz).
+    vad_sample_rate: u32,
     buffer: Vec<f32>,
     speech_segments: VecDeque<SpeechSegment>,
     current_speech: Vec<f32>,
@@ -29,10 +32,22 @@ pub struct ContinuousVadProcessor {
     /// Maximum speech duration in samples before forcing a segment split.
     /// Prevents unbounded accumulation when speech is continuous.
     max_speech_samples: usize,
+    /// Tracks whether we force-split at least once during the current speech run.
+    /// If true, `SpeechEnd.samples` can contain the entire run (including already
+    /// emitted chunks), so we must avoid re-emitting that full duplicate.
+    force_split_since_speech_start: bool,
 }
 
 impl ContinuousVadProcessor {
     pub fn new(input_sample_rate: u32, redemption_time_ms: u32) -> Result<Self> {
+        Self::with_max_speech_duration(input_sample_rate, redemption_time_ms, 10)
+    }
+
+    pub fn with_max_speech_duration(
+        input_sample_rate: u32,
+        redemption_time_ms: u32,
+        max_speech_duration_sec: usize,
+    ) -> Result<Self> {
         // Silero VAD MUST use 16kHz - this is hardcoded requirement
         const VAD_SAMPLE_RATE: u32 = 16000;
 
@@ -43,20 +58,20 @@ impl ContinuousVadProcessor {
         // CONTINUOUS SPEECH FIX: Tuned for capturing complete 5+ second utterances
         // Previous: 0.55/0.40 with 400ms redemption was fragmenting speech into 40ms segments
         // New: More lenient thresholds + longer redemption for continuous speech
-        config.positive_speech_threshold = 0.50;  // Silero default - good for continuous speech
-        config.negative_speech_threshold = 0.35;  // Silero default - allows natural pauses
+        config.positive_speech_threshold = 0.50; // Silero default - good for continuous speech
+        config.negative_speech_threshold = 0.35; // Silero default - allows natural pauses
 
         // CRITICAL FIX: Removed redemption_time capping to support long continuous speech
         // Previous: capped at 400ms, causing VAD to fragment 5-second speech into 40ms segments
         // New: Use full redemption_time from pipeline (2000ms) to bridge natural pauses
         config.redemption_time = Duration::from_millis(redemption_time_ms as u64);
-        config.pre_speech_pad = Duration::from_millis(300);   // Pre-speech padding for context
-        config.post_speech_pad = Duration::from_millis(400);  // Increased: more context at end
+        config.pre_speech_pad = Duration::from_millis(300); // Pre-speech padding for context
+        config.post_speech_pad = Duration::from_millis(400); // Increased: more context at end
 
         // CRITICAL FIX: Increased min_speech_time to prevent tiny 40ms fragments
         // Previous: 100ms allowed too-short segments that Whisper rejects
         // New: 250ms ensures segments are substantial enough for Whisper (>100ms requirement)
-        config.min_speech_time = Duration::from_millis(250);  // Prevent tiny fragments
+        config.min_speech_time = Duration::from_millis(250); // Prevent tiny fragments
 
         debug!("Creating VAD session with: sample_rate={}Hz, redemption={}ms, min_speech={}ms, input_rate={}Hz",
                VAD_SAMPLE_RATE, redemption_time_ms, 250, input_sample_rate);
@@ -67,21 +82,24 @@ impl ContinuousVadProcessor {
         // VAD uses 30ms chunks at 16kHz (480 samples)
         let vad_chunk_size = (VAD_SAMPLE_RATE as f32 * 0.03) as usize; // 480 samples
 
-        info!("VAD processor created: input={}Hz, vad={}Hz, chunk_size={} samples",
-              input_sample_rate, VAD_SAMPLE_RATE, vad_chunk_size);
+        info!(
+            "VAD processor created: input={}Hz, vad={}Hz, chunk_size={} samples",
+            input_sample_rate, VAD_SAMPLE_RATE, vad_chunk_size
+        );
 
-        // Force-split long continuous speech to keep transcription latency low.
-        // 10 seconds at 16kHz (VAD always operates at 16kHz internally).
-        const MAX_SPEECH_DURATION_SEC: usize = 10;
-        let max_speech_samples = MAX_SPEECH_DURATION_SEC * 16000;
+        // Force-split long continuous speech to keep transcription latency bounded.
+        let max_speech_samples = max_speech_duration_sec * 16000;
 
-        info!("VAD processor: max_speech_duration={}s ({}  samples at 16kHz)",
-              MAX_SPEECH_DURATION_SEC, max_speech_samples);
+        info!(
+            "VAD processor: max_speech_duration={}s ({} samples at 16kHz)",
+            max_speech_duration_sec, max_speech_samples
+        );
 
         Ok(Self {
             session,
             chunk_size: vad_chunk_size,
-            sample_rate: input_sample_rate, // Store original for timestamp calculations
+            input_sample_rate,
+            vad_sample_rate: VAD_SAMPLE_RATE,
             buffer: Vec::with_capacity(vad_chunk_size * 2),
             speech_segments: VecDeque::new(),
             current_speech: Vec::new(),
@@ -91,6 +109,7 @@ impl ContinuousVadProcessor {
             // Initialize state tracking
             last_logged_state: false,
             max_speech_samples,
+            force_split_since_speech_start: false,
         })
     }
 
@@ -98,7 +117,7 @@ impl ContinuousVadProcessor {
     /// Handles resampling from input sample rate to 16kHz for VAD processing
     pub fn process_audio(&mut self, samples: &[f32]) -> Result<Vec<SpeechSegment>> {
         // Resample to 16kHz if needed
-        let resampled_audio = if self.sample_rate == 16000 {
+        let resampled_audio = if self.input_sample_rate == self.vad_sample_rate {
             samples.to_vec()
         } else {
             self.resample_to_16k(samples)?
@@ -124,23 +143,24 @@ impl ContinuousVadProcessor {
     /// Improved resampling from input sample rate to 16kHz with anti-aliasing
     /// Uses linear interpolation and basic low-pass filtering for better quality
     fn resample_to_16k(&self, samples: &[f32]) -> Result<Vec<f32>> {
-        if self.sample_rate == 16000 {
+        if self.input_sample_rate == self.vad_sample_rate {
             return Ok(samples.to_vec());
         }
 
         // Calculate downsampling ratio
-        let ratio = self.sample_rate as f64 / 16000.0;
+        let ratio = self.input_sample_rate as f64 / self.vad_sample_rate as f64;
         let output_len = (samples.len() as f64 / ratio) as usize;
         let mut resampled = Vec::with_capacity(output_len);
 
         // Apply simple low-pass filter before downsampling to reduce aliasing
         let cutoff_freq = 0.4; // Normalized frequency (0.4 * Nyquist)
         let mut filtered_samples = Vec::with_capacity(samples.len());
-        
+
         // Simple moving average filter (basic low-pass)
-        let filter_size = (self.sample_rate as f64 / (cutoff_freq * self.sample_rate as f64)) as usize;
+        let filter_size = (self.input_sample_rate as f64
+            / (cutoff_freq * self.input_sample_rate as f64)) as usize;
         let filter_size = std::cmp::max(1, std::cmp::min(filter_size, 5)); // Limit filter size
-        
+
         for i in 0..samples.len() {
             let start = if i >= filter_size { i - filter_size } else { 0 };
             let end = std::cmp::min(i + filter_size + 1, samples.len());
@@ -153,7 +173,7 @@ impl ContinuousVadProcessor {
             let source_pos = i as f64 * ratio;
             let source_index = source_pos as usize;
             let fraction = source_pos - source_index as f64;
-            
+
             if source_index + 1 < filtered_samples.len() {
                 // Linear interpolation
                 let sample1 = filtered_samples[source_index];
@@ -165,8 +185,12 @@ impl ContinuousVadProcessor {
             }
         }
 
-        debug!("Resampled from {} samples ({}Hz) to {} samples (16kHz) with anti-aliasing",
-               samples.len(), self.sample_rate, resampled.len());
+        debug!(
+            "Resampled from {} samples ({}Hz) to {} samples (16kHz) with anti-aliasing",
+            samples.len(),
+            self.input_sample_rate,
+            resampled.len()
+        );
 
         Ok(resampled)
     }
@@ -191,8 +215,8 @@ impl ContinuousVadProcessor {
 
         // Force end any ongoing speech
         if self.in_speech && !self.current_speech.is_empty() {
-            let start_ms = (self.speech_start_sample as f64 / self.sample_rate as f64) * 1000.0;
-            let end_ms = (self.processed_samples as f64 / self.sample_rate as f64) * 1000.0;
+            let start_ms = (self.speech_start_sample as f64 / self.vad_sample_rate as f64) * 1000.0;
+            let end_ms = (self.processed_samples as f64 / self.vad_sample_rate as f64) * 1000.0;
 
             let segment = SpeechSegment {
                 samples: self.current_speech.clone(),
@@ -204,6 +228,7 @@ impl ContinuousVadProcessor {
             self.speech_segments.push_back(segment);
             self.current_speech.clear();
             self.in_speech = false;
+            self.force_split_since_speech_start = false;
         }
 
         // Extract all remaining segments
@@ -215,7 +240,9 @@ impl ContinuousVadProcessor {
     }
 
     fn process_chunk(&mut self, chunk: &[f32]) -> Result<()> {
-        let transitions = self.session.process(chunk)
+        let transitions = self
+            .session
+            .process(chunk)
             .map_err(|e| anyhow!("VAD processing failed: {}", e))?;
 
         // Handle VAD transitions
@@ -228,39 +255,75 @@ impl ContinuousVadProcessor {
                         self.last_logged_state = true;
                     }
                     self.in_speech = true;
-                    self.speech_start_sample = self.processed_samples + (timestamp_ms * self.sample_rate as usize / 1000);
+                    // timestamp_ms from Silero is ABSOLUTE (ms since session start),
+                    // so convert directly to sample index. Do NOT add processed_samples
+                    // — that would double-count the position.
+                    self.speech_start_sample =
+                        timestamp_ms * self.vad_sample_rate as usize / 1000;
                     self.current_speech.clear();
+                    self.force_split_since_speech_start = false;
                 }
-                VadTransition::SpeechEnd { start_timestamp_ms, end_timestamp_ms, samples } => {
+                VadTransition::SpeechEnd {
+                    start_timestamp_ms,
+                    end_timestamp_ms,
+                    samples,
+                } => {
                     // Only log if we were previously in speech state
                     if self.last_logged_state {
-                        info!("VAD: Speech ended at {}ms (duration: {}ms)", end_timestamp_ms, end_timestamp_ms - start_timestamp_ms);
+                        info!(
+                            "VAD: Speech ended at {}ms (duration: {}ms)",
+                            end_timestamp_ms,
+                            end_timestamp_ms - start_timestamp_ms
+                        );
                         self.last_logged_state = false;
                     }
                     self.in_speech = false;
 
-                    // Use samples from VAD transition if available, otherwise use accumulated samples
-                    let speech_samples = if !samples.is_empty() {
+                    // Prefer transition samples when available. After force-splitting, this
+                    // is typically the full speech run and can be used as a higher-quality
+                    // refinement transcript on the frontend.
+                    let use_transition_samples = !samples.is_empty();
+                    if self.force_split_since_speech_start && use_transition_samples {
+                        info!(
+                            "VAD: Emitting full-run refinement segment at speech end ({} samples)",
+                            samples.len()
+                        );
+                    }
+                    let speech_samples = if use_transition_samples {
                         samples
                     } else {
                         self.current_speech.clone()
                     };
 
                     if !speech_samples.is_empty() {
+                        let (segment_start_ms, segment_end_ms) = if use_transition_samples {
+                            (start_timestamp_ms as f64, end_timestamp_ms as f64)
+                        } else {
+                            (
+                                (self.speech_start_sample as f64 / self.vad_sample_rate as f64)
+                                    * 1000.0,
+                                end_timestamp_ms as f64,
+                            )
+                        };
+
                         let segment = SpeechSegment {
                             samples: speech_samples,
-                            start_timestamp_ms: start_timestamp_ms as f64,
-                            end_timestamp_ms: end_timestamp_ms as f64,
+                            start_timestamp_ms: segment_start_ms,
+                            end_timestamp_ms: segment_end_ms,
                             confidence: 0.9, // VAD confidence
                         };
 
-                        info!("VAD: Completed speech segment: {:.1}ms duration, {} samples",
-                              end_timestamp_ms - start_timestamp_ms, segment.samples.len());
+                        info!(
+                            "VAD: Completed speech segment: {:.1}ms duration, {} samples",
+                            end_timestamp_ms - start_timestamp_ms,
+                            segment.samples.len()
+                        );
 
                         self.speech_segments.push_back(segment);
                     }
 
                     self.current_speech.clear();
+                    self.force_split_since_speech_start = false;
                 }
             }
         }
@@ -268,13 +331,15 @@ impl ContinuousVadProcessor {
         // Accumulate speech if we're currently in a speech state
         if self.in_speech {
             self.current_speech.extend_from_slice(chunk);
+            let chunk_end_sample = self.processed_samples + chunk.len();
 
             // Force-split if speech exceeds max duration to keep transcription latency low.
             // This emits the accumulated segment immediately and starts a new one,
             // without resetting the VAD state (speech continues seamlessly).
             if self.current_speech.len() >= self.max_speech_samples {
-                let start_ms = (self.speech_start_sample as f64 / self.sample_rate as f64) * 1000.0;
-                let end_ms = (self.processed_samples as f64 / self.sample_rate as f64) * 1000.0;
+                let start_ms =
+                    (self.speech_start_sample as f64 / self.vad_sample_rate as f64) * 1000.0;
+                let end_ms = (chunk_end_sample as f64 / self.vad_sample_rate as f64) * 1000.0;
 
                 info!("VAD: Force-splitting long speech segment at {}ms (duration: {:.0}ms, {} samples)",
                       end_ms, end_ms - start_ms, self.current_speech.len());
@@ -289,7 +354,8 @@ impl ContinuousVadProcessor {
 
                 // Reset for next segment but stay in speech state
                 self.current_speech.clear();
-                self.speech_start_sample = self.processed_samples;
+                self.speech_start_sample = chunk_end_sample;
+                self.force_split_since_speech_start = true;
             }
         }
 
@@ -315,10 +381,15 @@ pub fn extract_speech_16k(samples_mono_16k: &[f32]) -> Result<Vec<f32>> {
     }
 
     // Apply balanced energy filtering for very short segments
-    if result.len() < 1600 { // Less than 100ms at 16kHz
-        let input_energy: f32 = samples_mono_16k.iter().map(|&x| x * x).sum::<f32>() / samples_mono_16k.len() as f32;
+    if result.len() < 1600 {
+        // Less than 100ms at 16kHz
+        let input_energy: f32 =
+            samples_mono_16k.iter().map(|&x| x * x).sum::<f32>() / samples_mono_16k.len() as f32;
         let rms = input_energy.sqrt();
-        let peak = samples_mono_16k.iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
+        let peak = samples_mono_16k
+            .iter()
+            .map(|&x| x.abs())
+            .fold(0.0f32, f32::max);
 
         // BALANCED FIX: Lowered thresholds to preserve quiet speech while still filtering silence
         // Previous aggressive values (0.08/0.15) were discarding valid quiet speech
@@ -327,20 +398,30 @@ pub fn extract_speech_16k(samples_mono_16k: &[f32]) -> Result<Vec<f32>> {
             info!("-----VAD detected silence/noise (RMS: {:.6}, Peak: {:.6}), skipping to prevent hallucinations-----", rms, peak);
             return Ok(Vec::new());
         } else {
-            info!("VAD detected speech with sufficient energy (RMS: {:.6}, Peak: {:.6})", rms, peak);
+            info!(
+                "VAD detected speech with sufficient energy (RMS: {:.6}, Peak: {:.6})",
+                rms, peak
+            );
             return Ok(samples_mono_16k.to_vec());
         }
     }
 
-    debug!("VAD: Processed {} samples, extracted {} speech samples from {} segments",
-           samples_mono_16k.len(), result.len(), num_segments);
+    debug!(
+        "VAD: Processed {} samples, extracted {} speech samples from {} segments",
+        samples_mono_16k.len(),
+        result.len(),
+        num_segments
+    );
 
     Ok(result)
 }
 
 /// Simple convenience function to get speech chunks from audio
 /// Uses the optimized ContinuousVadProcessor with configurable redemption time
-pub fn get_speech_chunks(samples_mono_16k: &[f32], redemption_time_ms: u32) -> Result<Vec<SpeechSegment>> {
+pub fn get_speech_chunks(
+    samples_mono_16k: &[f32],
+    redemption_time_ms: u32,
+) -> Result<Vec<SpeechSegment>> {
     let mut processor = ContinuousVadProcessor::new(16000, redemption_time_ms)?;
 
     // Process all audio
@@ -350,5 +431,3 @@ pub fn get_speech_chunks(samples_mono_16k: &[f32], redemption_time_ms: u32) -> R
 
     Ok(segments)
 }
-
- 

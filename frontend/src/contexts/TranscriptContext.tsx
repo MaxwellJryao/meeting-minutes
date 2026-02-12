@@ -8,9 +8,19 @@ import { transcriptService } from '@/services/transcriptService';
 import { recordingService } from '@/services/recordingService';
 import { indexedDBService } from '@/services/indexedDBService';
 
+// Partial transcript from streaming ASR (e.g., Qwen3-ASR token-by-token output)
+interface PartialTranscript {
+  chunk_id: number;
+  text: string;
+  chunk_start_time: number;
+  audio_start_time: number;
+  audio_end_time: number;
+}
+
 interface TranscriptContextType {
   transcripts: Transcript[];
   transcriptsRef: MutableRefObject<Transcript[]>
+  partialTranscript: PartialTranscript | null;
   addTranscript: (update: TranscriptUpdate) => void;
   copyTranscript: () => void;
   flushBuffer: () => void;
@@ -26,6 +36,7 @@ const TranscriptContext = createContext<TranscriptContextType | undefined>(undef
 
 export function TranscriptProvider({ children }: { children: ReactNode }) {
   const [transcripts, setTranscripts] = useState<Transcript[]>([]);
+  const [partialTranscript, setPartialTranscript] = useState<PartialTranscript | null>(null);
   const [meetingTitle, setMeetingTitle] = useState('+ New Call');
   const [currentMeetingId, setCurrentMeetingId] = useState<string | null>(null);
 
@@ -184,6 +195,76 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     let transcriptBuffer = new Map<number, Transcript>();
     let lastProcessedSequence = 0;
     let processingTimer: NodeJS.Timeout | undefined;
+    const RANGE_EPSILON_SEC = 0.6;
+    const MIN_REPLACEMENT_DURATION_SEC = 4;
+    const MIN_REPLACEMENT_SEGMENTS_DEFAULT = 2;
+    const MIN_REPLACEMENT_SEGMENTS_REFINEMENT = 1; // Lower threshold for explicit refinement segments
+    const MIN_TEXT_COVERAGE_RATIO = 0.6;
+    const MIN_ENGLISH_WORD_COVERAGE_RATIO = 0.5;
+
+    const hasAudioRange = (t: Transcript) =>
+      t.audio_start_time !== undefined &&
+      t.audio_end_time !== undefined &&
+      t.audio_end_time > t.audio_start_time;
+
+    const transcriptDuration = (t: Transcript) =>
+      t.duration ?? ((t.audio_end_time ?? 0) - (t.audio_start_time ?? 0));
+
+    const englishWordCount = (text: string) => {
+      const words = text.toLowerCase().match(/[a-z]+(?:'[a-z]+)?/g);
+      return words ? words.length : 0;
+    };
+
+    const isCoveredByRange = (candidate: Transcript, container: Transcript) => {
+      if (!hasAudioRange(candidate) || !hasAudioRange(container)) return false;
+      return (
+        (candidate.audio_start_time as number) >= (container.audio_start_time as number) - RANGE_EPSILON_SEC &&
+        (candidate.audio_end_time as number) <= (container.audio_end_time as number) + RANGE_EPSILON_SEC
+      );
+    };
+
+    const shouldReplaceWithConsolidated = (incoming: Transcript, covered: Transcript[]) => {
+      if (!hasAudioRange(incoming)) return false;
+
+      // Use lower threshold for explicit refinement segments from VAD force-split full-run
+      const minSegments = incoming.is_refinement
+        ? MIN_REPLACEMENT_SEGMENTS_REFINEMENT
+        : MIN_REPLACEMENT_SEGMENTS_DEFAULT;
+
+      if (covered.length < minSegments) return false;
+      if (transcriptDuration(incoming) < MIN_REPLACEMENT_DURATION_SEC) return false;
+
+      const coveredWithRange = covered.filter(hasAudioRange);
+      if (coveredWithRange.length < minSegments) return false;
+
+      const coveredStart = Math.min(...coveredWithRange.map(t => t.audio_start_time as number));
+      const coveredEnd = Math.max(...coveredWithRange.map(t => t.audio_end_time as number));
+      const coveredSpan = Math.max(0, coveredEnd - coveredStart);
+      const incomingSpan = transcriptDuration(incoming);
+
+      // Core signal: incoming consolidated transcript should span most of the covered window.
+      if (coveredSpan > 0 && incomingSpan < coveredSpan * 0.75) return false;
+
+      const coveredTextLen = covered.reduce((sum, t) => sum + t.text.trim().length, 0);
+      const incomingTextLen = incoming.text.trim().length;
+      const requiredTextLen = Math.max(20, coveredTextLen * MIN_TEXT_COVERAGE_RATIO);
+      if (incomingTextLen < requiredTextLen) return false;
+
+      // Protect mixed-language (especially English terms) from being dropped by a
+      // lower-recall consolidated pass.
+      const coveredEnglish = covered.reduce((sum, t) => sum + englishWordCount(t.text), 0);
+      if (coveredEnglish >= 3) {
+        const incomingEnglish = englishWordCount(incoming.text);
+        if (incomingEnglish < coveredEnglish * MIN_ENGLISH_WORD_COVERAGE_RATIO) {
+          console.log(
+            `⛔ Skip consolidated replacement seq=${incoming.sequence_id}: english coverage too low (${incomingEnglish}/${coveredEnglish})`
+          );
+          return false;
+        }
+      }
+
+      return true;
+    };
 
     const processBufferedTranscripts = (forceFlush = false) => {
       const sortedTranscripts: Transcript[] = [];
@@ -260,8 +341,28 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
 
           console.log(`Adding ${uniqueNewTranscripts.length} unique transcripts out of ${allNewTranscripts.length} received`);
 
-          // Merge with existing transcripts, maintaining chronological order
-          const combined = [...prev, ...uniqueNewTranscripts];
+          // Apply in sequence order so "final full-run" updates can replace earlier chunked updates.
+          const orderedNew = [...uniqueNewTranscripts].sort((a, b) => (a.sequence_id || 0) - (b.sequence_id || 0));
+          let combined = [...prev];
+
+          for (const incoming of orderedNew) {
+            const covered = combined.filter(existing =>
+              existing.id !== incoming.id &&
+              isCoveredByRange(existing, incoming)
+            );
+
+            if (incoming.is_refinement) {
+              console.log(`🔍 Refinement segment seq=${incoming.sequence_id}: audio=[${incoming.audio_start_time?.toFixed(1)}, ${incoming.audio_end_time?.toFixed(1)}], covered=${covered.length} segments, text="${incoming.text.substring(0, 50)}..."`);
+            }
+
+            if (shouldReplaceWithConsolidated(incoming, covered)) {
+              const coveredIds = new Set(covered.map(t => t.id));
+              combined = combined.filter(t => !coveredIds.has(t.id));
+              console.log(`🔁 Consolidated transcript seq=${incoming.sequence_id} (refinement=${incoming.is_refinement}) replaced ${covered.length} chunk segments`);
+            }
+
+            combined.push(incoming);
+          }
 
           // Sort by chunk_start_time first, then by sequence_id
           return combined.sort((a, b) => {
@@ -302,6 +403,11 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             return;
           }
 
+          // Final transcript arrived — clear any streaming partial preview
+          if (!update.is_partial) {
+            setPartialTranscript(null);
+          }
+
           // Create transcript for buffer with NEW timestamp fields
           const newTranscript: Transcript = {
             id: `${Date.now()}-${transcriptCounter++}`,
@@ -315,6 +421,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
             audio_start_time: update.audio_start_time,
             audio_end_time: update.audio_end_time,
             duration: update.duration,
+            is_refinement: update.is_refinement,
           };
 
           // Add to buffer
@@ -357,6 +464,32 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
       }
     };
   }, [currentMeetingId]); // Add currentMeetingId dependency
+
+  // Listen for streaming partial transcript updates (e.g., Qwen3-ASR token-by-token)
+  // These arrive on a separate "transcript-partial" event channel and are displayed
+  // as a live preview. They get replaced by the final "transcript-update" for the same chunk.
+  useEffect(() => {
+    let unlistenPartial: (() => void) | undefined;
+
+    const setupPartialListener = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlistenPartial = await listen<PartialTranscript>('transcript-partial', (event) => {
+          setPartialTranscript(event.payload);
+        });
+      } catch (error) {
+        console.warn('Failed to setup partial transcript listener:', error);
+      }
+    };
+
+    setupPartialListener();
+
+    return () => {
+      if (unlistenPartial) {
+        unlistenPartial();
+      }
+    };
+  }, []);
 
   // Sync transcript history and meeting name from backend on reload
   // This fixes the issue where reloading during active recording causes state desync
@@ -483,6 +616,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   // Clear transcripts (used when starting new recording)
   const clearTranscripts = useCallback(() => {
     setTranscripts([]);
+    setPartialTranscript(null);
     // Don't clear currentMeetingId here - it will be set by recording-started event
   }, []);
 
@@ -512,6 +646,7 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
   const value: TranscriptContextType = {
     transcripts,
     transcriptsRef,
+    partialTranscript,
     addTranscript,
     copyTranscript,
     flushBuffer,

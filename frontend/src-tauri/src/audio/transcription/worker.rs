@@ -15,13 +15,31 @@ use tauri::{AppHandle, Emitter, Runtime};
 // Sequence counter for transcript updates
 static SEQUENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Default)]
+struct LastTranscriptState {
+    text: String,
+    audio_end_time: Option<f64>,
+}
+
+// Track the last emitted transcript for overlap deduplication.
+// Dedup should only happen for temporally adjacent segments.
+static LAST_TRANSCRIPT_STATE: LazyLock<std::sync::Mutex<LastTranscriptState>> =
+    LazyLock::new(|| std::sync::Mutex::new(LastTranscriptState::default()));
+
 // Speech detection flag - reset per recording session
 static SPEECH_DETECTED_EMITTED: AtomicBool = AtomicBool::new(false);
 
-/// Reset the speech detected flag for a new recording session
+/// Reset the speech detected flag and transcript dedup state for a new recording session
 pub fn reset_speech_detected_flag() {
     SPEECH_DETECTED_EMITTED.store(false, Ordering::SeqCst);
-    info!("🔍 SPEECH_DETECTED_EMITTED reset to: {}", SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst));
+    if let Ok(mut last) = LAST_TRANSCRIPT_STATE.lock() {
+        last.text.clear();
+        last.audio_end_time = None;
+    }
+    info!(
+        "🔍 SPEECH_DETECTED_EMITTED reset to: {}",
+        SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst)
+    );
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,7 +54,8 @@ pub struct TranscriptUpdate {
     // NEW: Recording-relative timestamps for playback sync
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
-    pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    pub duration: f64,         // Segment duration in seconds (e.g., 3.3)
+    pub is_refinement: bool,   // True for full-run refinement segments that should replace chunks
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -51,7 +70,8 @@ pub fn start_transcription_task<R: Runtime>(
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         // Initialize transcription engine (Whisper or Parakeet based on config)
-        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await {
+        let transcription_engine = match super::engine::get_or_init_transcription_engine(&app).await
+        {
             Ok(engine) => engine,
             Err(e) => {
                 error!("Failed to initialize transcription engine: {}", e);
@@ -74,7 +94,11 @@ pub fn start_transcription_task<R: Runtime>(
         let chunks_completed = Arc::new(AtomicU64::new(0));
         let input_finished = Arc::new(AtomicBool::new(false));
 
-        info!("📊 Starting {} transcription worker{} (serial mode for ordered emission)", NUM_WORKERS, if NUM_WORKERS == 1 { "" } else { "s" });
+        info!(
+            "📊 Starting {} transcription worker{} (serial mode for ordered emission)",
+            NUM_WORKERS,
+            if NUM_WORKERS == 1 { "" } else { "s" }
+        );
 
         // Spawn worker tasks
         let mut worker_handles = Vec::new();
@@ -109,7 +133,10 @@ pub fn start_transcription_task<R: Runtime>(
                         worker_id, engine_name, current_model
                     );
                 } else {
-                    warn!("⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped", worker_id, engine_name);
+                    warn!(
+                        "⚠️ Worker {} pre-validation: {} model not loaded - chunks may be skipped",
+                        worker_id, engine_name
+                    );
                 }
 
                 loop {
@@ -145,20 +172,22 @@ pub fn start_transcription_task<R: Runtime>(
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
 
+                            info!("📊 Chunk {} details: timestamp={:.2}s, duration={:.2}s, samples={}, sample_rate={}, time_range=[{:.2}s - {:.2}s]",
+                                  chunk.chunk_id, chunk_timestamp, chunk_duration,
+                                  chunk.data.len(), chunk.sample_rate,
+                                  chunk_timestamp, chunk_timestamp + chunk_duration);
+
                             // Transcribe with provider-agnostic approach
-                            match transcribe_chunk_with_provider(
-                                &engine_clone,
-                                chunk,
-                                &app_clone,
-                            )
-                            .await
+                            match transcribe_chunk_with_provider(&engine_clone, chunk, &app_clone)
+                                .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
                                     // Provider-aware confidence threshold
                                     let confidence_threshold = match &engine_clone {
-                                        TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) => 0.3,
+                                        TranscriptionEngine::Whisper(_)
+                                        | TranscriptionEngine::Provider(_) => 0.3,
                                         TranscriptionEngine::Parakeet(_) => 0.0, // Parakeet has no confidence, accept all
-                                        TranscriptionEngine::QwenAsr(_) => 0.0,  // QwenASR has no confidence, accept all
+                                        TranscriptionEngine::QwenAsr(_) => 0.0, // QwenASR has no confidence, accept all
                                     };
 
                                     let confidence_str = match confidence_opt {
@@ -170,7 +199,8 @@ pub fn start_transcription_task<R: Runtime>(
                                           worker_id, transcript, confidence_str, is_partial, confidence_threshold);
 
                                     // Check confidence threshold (or accept if no confidence provided)
-                                    let meets_threshold = confidence_opt.map_or(true, |c| c >= confidence_threshold);
+                                    let meets_threshold =
+                                        confidence_opt.map_or(true, |c| c >= confidence_threshold);
 
                                     if !transcript.trim().is_empty() && meets_threshold {
                                         // PERFORMANCE: Only log transcription results, not every processing step
@@ -179,7 +209,8 @@ pub fn start_transcription_task<R: Runtime>(
 
                                         // Emit speech-detected event for frontend UX (only on first detection per session)
                                         // This is lightweight and provides better user feedback
-                                        let current_flag = SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
+                                        let current_flag =
+                                            SPEECH_DETECTED_EMITTED.load(Ordering::SeqCst);
                                         info!("🔍 Checking speech-detected flag: current={}, will_emit={}", current_flag, !current_flag);
 
                                         if !current_flag {
@@ -195,7 +226,8 @@ pub fn start_transcription_task<R: Runtime>(
                                         }
 
                                         // Generate sequence ID and calculate timestamps FIRST
-                                        let sequence_id = SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+                                        let sequence_id =
+                                            SEQUENCE_COUNTER.fetch_add(1, Ordering::SeqCst);
                                         let audio_start_time = chunk_timestamp; // Already in seconds from recording start
                                         let audio_end_time = chunk_timestamp + chunk_duration;
 
@@ -206,10 +238,83 @@ pub fn start_transcription_task<R: Runtime>(
                                         // The recording_commands module listens to these events and saves them
                                         // This decouples the transcription worker from direct RECORDING_MANAGER access
 
+                                        // Detect refinement segments: a segment whose start time is
+                                        // significantly before the last emitted segment's end time.
+                                        // This happens when VAD force-splits continuous speech and then
+                                        // emits the full speech run at SpeechEnd.
+                                        let is_refinement = {
+                                            let last = LAST_TRANSCRIPT_STATE
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+                                            last.audio_end_time.map_or(false, |last_end| {
+                                                // Refinement: starts >2s before last segment ended
+                                                // and has substantial duration (>4s)
+                                                audio_start_time < last_end - 2.0
+                                                    && chunk_duration > 4.0
+                                            })
+                                        };
+
+                                        if is_refinement {
+                                            info!(
+                                                "📝 Detected refinement segment: audio=[{:.1}s, {:.1}s] (duration={:.1}s) overlaps previous segments",
+                                                audio_start_time, audio_end_time, chunk_duration
+                                            );
+                                        }
+
+                                        // Remove overlapping text with the previous transcript segment
+                                        let deduped_transcript = if !is_partial {
+                                            // Only apply overlap dedup when segments are near-adjacent in time.
+                                            // After pause/resume or mode/device changes, aggressive dedup can
+                                            // incorrectly suppress valid new utterances.
+                                            const MAX_DEDUP_GAP_SEC: f64 = 1.5;
+                                            const MAX_NEGATIVE_DRIFT_SEC: f64 = 0.2;
+
+                                            let mut last = LAST_TRANSCRIPT_STATE
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner());
+
+                                            // Skip dedup for refinement segments — they intentionally
+                                            // re-transcribe the same audio range at higher quality.
+                                            let should_dedup = !is_refinement &&
+                                                last.audio_end_time.map_or(false, |last_end| {
+                                                    let gap = audio_start_time - last_end;
+                                                    gap >= -MAX_NEGATIVE_DRIFT_SEC
+                                                        && gap <= MAX_DEDUP_GAP_SEC
+                                                });
+
+                                            let deduped = if should_dedup {
+                                                remove_text_overlap(&last.text, &transcript)
+                                            } else {
+                                                transcript.clone()
+                                            };
+
+                                            // Always refresh last state for next segment decision.
+                                            // For refinement segments, update end time to the max
+                                            // to avoid deduping the next real segment against
+                                            // a stale earlier end time.
+                                            last.text = transcript;
+                                            let new_end = if is_refinement {
+                                                Some(audio_end_time.max(last.audio_end_time.unwrap_or(0.0)))
+                                            } else {
+                                                Some(audio_end_time)
+                                            };
+                                            last.audio_end_time = new_end;
+                                            deduped
+                                        } else {
+                                            transcript
+                                        };
+
+                                        // Skip if dedup removed all content
+                                        if deduped_transcript.trim().is_empty() {
+                                            info!("📝 Transcript fully overlapped with previous, skipping");
+                                            chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                            continue;
+                                        }
+
                                         // Emit transcript update with NEW recording-relative timestamps
 
                                         let update = TranscriptUpdate {
-                                            text: transcript,
+                                            text: deduped_transcript,
                                             timestamp: format_current_timestamp(), // Wall-clock for reference
                                             source: "Audio".to_string(),
                                             sequence_id,
@@ -220,6 +325,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            is_refinement,
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)
@@ -248,13 +354,20 @@ pub fn start_transcription_task<R: Runtime>(
                                             continue;
                                         }
                                         TranscriptionError::ModelNotLoaded => {
-                                            warn!("Worker {}: Model unloaded during transcription", worker_id);
+                                            warn!(
+                                                "Worker {}: Model unloaded during transcription",
+                                                worker_id
+                                            );
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             continue;
                                         }
                                         _ => {
-                                            warn!("Worker {}: Transcription failed: {}", worker_id, e);
-                                            let _ = app_clone.emit("transcription-warning", e.to_string());
+                                            warn!(
+                                                "Worker {}: Transcription failed: {}",
+                                                worker_id, e
+                                            );
+                                            let _ = app_clone
+                                                .emit("transcription-warning", e.to_string());
                                         }
                                     }
                                 }
@@ -525,7 +638,10 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
             }
         }
         TranscriptionEngine::QwenAsr(qwen_engine) => {
-            // Use streaming transcription to emit partial results token-by-token
+            // Emit streaming partial updates via a separate event channel so they
+            // don't interfere with the sequence_id-based ordering of final transcripts.
+            // Partials are keyed by chunk_id; the frontend replaces previous partials
+            // for the same chunk and removes the partial once the final arrives.
             let app_for_streaming = app.clone();
             let chunk_id = chunk.chunk_id;
             let chunk_ts = chunk.timestamp;
@@ -541,36 +657,38 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                 let count = token_count_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Emit partial transcript every 5 tokens for smooth UI updates
+                // Uses a dedicated "transcript-partial" event so it doesn't pollute
+                // the sequence_id-ordered "transcript-update" stream.
                 if count % 5 == 4 {
                     let partial_text = clean_qwen_asr_output(buf.as_str());
                     if !partial_text.is_empty() {
-                        let partial_update = TranscriptUpdate {
-                            text: partial_text,
-                            timestamp: format_current_timestamp(),
-                            source: "Audio".to_string(),
-                            sequence_id: 0, // Partial updates use 0; final gets real ID
-                            chunk_start_time: chunk_ts,
-                            is_partial: true,
-                            confidence: 0.0,
-                            audio_start_time: chunk_ts,
-                            audio_end_time: chunk_ts + chunk_dur,
-                            duration: chunk_dur,
-                        };
-                        let _ = app_for_streaming.emit("transcript-update", &partial_update);
+                        let _ = app_for_streaming.emit(
+                            "transcript-partial",
+                            serde_json::json!({
+                                "chunk_id": chunk_id,
+                                "text": partial_text,
+                                "chunk_start_time": chunk_ts,
+                                "audio_start_time": chunk_ts,
+                                "audio_end_time": chunk_ts + chunk_dur,
+                            }),
+                        );
                     }
                 }
                 true // continue decoding
             };
 
-            match qwen_engine.transcribe_audio_streaming(speech_samples, on_token).await {
+            match qwen_engine
+                .transcribe_audio_streaming(speech_samples, on_token)
+                .await
+            {
                 Ok(text) => {
-                    info!(
-                        "QwenASR raw output for chunk {}: '{}'",
-                        chunk_id, text
-                    );
+                    info!("QwenASR raw output for chunk {}: '{}'", chunk_id, text);
                     let cleaned_text = clean_qwen_asr_output(&text);
                     if cleaned_text.is_empty() {
-                        info!("QwenASR chunk {} cleaned to empty (raw was '{}'), skipping", chunk_id, text);
+                        info!(
+                            "QwenASR chunk {} cleaned to empty (raw was '{}'), skipping",
+                            chunk_id, text
+                        );
                         return Ok((String::new(), None, false));
                     }
 
@@ -583,10 +701,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                     Ok((cleaned_text, None, false))
                 }
                 Err(e) => {
-                    error!(
-                        "QwenASR transcription failed for chunk {}: {}",
-                        chunk_id, e
-                    );
+                    error!("QwenASR transcription failed for chunk {}: {}", chunk_id, e);
 
                     let transcription_error = TranscriptionError::EngineFailed(e.to_string());
                     let _ = app.emit(
@@ -653,6 +768,84 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
     }
 }
 
+/// Remove overlapping text between consecutive transcript segments.
+///
+/// When VAD splits continuous speech, adjacent chunks can produce overlapping transcriptions.
+/// This function finds the longest suffix of `previous` that is a prefix of `current`
+/// and returns `current` with that overlap removed.
+fn remove_text_overlap(previous: &str, current: &str) -> String {
+    let previous = previous.trim();
+    let current = current.trim_start();
+
+    if previous.is_empty() || current.is_empty() {
+        return current.to_string();
+    }
+
+    // Find the longest suffix of `previous` that matches a prefix of `current`.
+    // We compare character-by-character using a sliding window.
+    let prev_chars: Vec<char> = previous.chars().collect();
+    let curr_chars: Vec<char> = current.chars().collect();
+
+    let mut best_overlap = 0;
+
+    // Only check overlaps of at least 4 characters to avoid false positives
+    let min_overlap = 4;
+    // IMPORTANT: we must allow overlap to exceed half of the current text.
+    // In continuous speech, next segment can be mostly repeated context with
+    // only a few new trailing words.
+    let max_check = curr_chars.len().min(prev_chars.len());
+
+    for overlap_len in min_overlap..=max_check {
+        let prev_suffix_start = prev_chars.len() - overlap_len;
+        let prev_suffix = &prev_chars[prev_suffix_start..];
+        let curr_prefix = &curr_chars[..overlap_len];
+
+        if prev_suffix == curr_prefix {
+            best_overlap = overlap_len;
+        }
+    }
+
+    if best_overlap >= min_overlap {
+        let deduped: String = curr_chars[best_overlap..].iter().collect();
+        info!(
+            "📝 Removed {} chars of text overlap between consecutive segments",
+            best_overlap
+        );
+        deduped.trim_start().to_string()
+    } else {
+        current.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remove_text_overlap;
+
+    #[test]
+    fn removes_overlap_larger_than_half_of_current() {
+        let previous = "let's review the roadmap for q2 and q3";
+        let current = "roadmap for q2 and q3 plus hiring plan";
+        assert_eq!(remove_text_overlap(previous, current), "plus hiring plan");
+    }
+
+    #[test]
+    fn removes_full_duplicate_segment() {
+        let previous = "we should align on launch timeline";
+        let current = "launch timeline";
+        assert_eq!(remove_text_overlap(previous, current), "");
+    }
+
+    #[test]
+    fn keeps_text_when_no_overlap() {
+        let previous = "budget approved yesterday";
+        let current = "design review starts tomorrow";
+        assert_eq!(
+            remove_text_overlap(previous, current),
+            "design review starts tomorrow"
+        );
+    }
+}
+
 /// Remove QwenASR language-prefix artifacts.
 ///
 /// Qwen3-ASR prepends a language tag directly before the transcript with NO separator:
@@ -675,7 +868,8 @@ fn clean_qwen_asr_output(text: &str) -> String {
             r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
             r"Cantonese|Yue|None|null",
             r")[:：]?\s*"
-        )).expect("valid regex")
+        ))
+        .expect("valid regex")
     });
     static LANGUAGE_SENTENCE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
@@ -688,7 +882,8 @@ fn clean_qwen_asr_output(text: &str) -> String {
             r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
             r"Cantonese|Yue|None|null",
             r")[:：]?\s*"
-        )).expect("valid regex")
+        ))
+        .expect("valid regex")
     });
     static MULTISPACE_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"[ \t]{2,}").expect("valid regex"));
