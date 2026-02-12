@@ -41,7 +41,8 @@
                     "description": "Main window capability with file system and media access",
                     "windows": [
                         "main",
-                        "meeting-banner"
+                        "meeting-banner",
+                        "dictation-widget"
                     ],
                     "permissions": [
                         "fs:default",

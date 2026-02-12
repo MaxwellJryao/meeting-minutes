@@ -38,12 +38,14 @@ export default function RootLayout({
 }) {
   const pathname = usePathname()
   const isBannerWindow = pathname === '/meeting-banner'
+  const isDictationWidget = pathname === '/dictation-widget'
+  const isOverlayWindow = isBannerWindow || isDictationWidget
 
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [onboardingCompleted, setOnboardingCompleted] = useState(false)
 
   useEffect(() => {
-    if (isBannerWindow) return // Skip onboarding check for banner
+    if (isOverlayWindow) return // Skip onboarding check for overlay windows
     // Check onboarding status first
     invoke<{ completed: boolean } | null>('get_onboarding_status')
       .then((status) => {
@@ -63,7 +65,28 @@ export default function RootLayout({
         setShowOnboarding(true)
         setOnboardingCompleted(false)
       })
-  }, [])
+  }, [isOverlayWindow])
+
+  // Sync saved dictation hotkey to backend listener at startup
+  useEffect(() => {
+    if (isOverlayWindow) return;
+
+    const syncDictationHotkey = async () => {
+      try {
+        const { Store } = await import('@tauri-apps/plugin-store');
+        const store = await Store.load('preferences.json');
+        const savedHotkey = await store.get<string>('dictation_hotkey');
+
+        if (savedHotkey && savedHotkey.trim()) {
+          await invoke('dictation_set_hotkey', { hotkey: savedHotkey });
+        }
+      } catch (error) {
+        console.error('[Layout] Failed to sync dictation hotkey:', error);
+      }
+    };
+
+    syncDictationHotkey();
+  }, [isOverlayWindow]);
 
   // Disable context menu in production
   useEffect(() => {
@@ -103,7 +126,7 @@ export default function RootLayout({
   }
 
   // Banner popup window: render children directly without providers/sidebar
-  if (isBannerWindow) {
+  if (isOverlayWindow) {
     return (
       <html lang="en" style={{ background: 'transparent' }}>
         <body className={`${sourceSans3.variable} font-sans antialiased`} style={{ background: 'transparent' }}>

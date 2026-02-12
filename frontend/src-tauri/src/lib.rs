@@ -40,6 +40,7 @@ pub mod api;
 pub mod audio;
 pub mod console_utils;
 pub mod database;
+pub mod dictation;
 pub mod meeting_detector;
 pub mod notifications;
 pub mod ollama;
@@ -422,6 +423,11 @@ pub fn run() {
                 log::error!("Failed to create system tray: {}", e);
             }
 
+            // Start global dictation hotkey listener (macOS event tap)
+            if let Err(e) = dictation::start_global_hotkey_listener(&_app.handle()) {
+                log::warn!("Failed to start dictation hotkey listener: {}", e);
+            }
+
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
             let app_for_notif = _app.handle().clone();
@@ -745,6 +751,20 @@ pub fn run() {
             database::commands::get_database_directory,
             database::commands::open_database_folder,
             whisper_engine::commands::open_models_folder,
+            // Dictation (push-to-talk) commands
+            dictation::dictation_start_manual,
+            dictation::dictation_stop_manual,
+            dictation::dictation_get_last_transcript,
+            dictation::dictation_paste_last_transcript,
+            dictation::dictation_get_hotkey,
+            dictation::dictation_set_hotkey,
+            dictation::dictation_get_debug_state,
+            dictation::dictation_clear_debug_events,
+            dictation::dictation_restart_listener,
+            dictation::dictation_check_accessibility,
+            dictation::dictation_request_accessibility,
+            dictation::dictation_check_input_monitoring,
+            dictation::dictation_request_input_monitoring,
             // Onboarding commands
             onboarding::get_onboarding_status,
             onboarding::save_onboarding_status_cmd,
@@ -760,6 +780,9 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 log::info!("Application exiting, cleaning up resources...");
                 tauri::async_runtime::block_on(async {
+                    // Stop global hotkey listener
+                    dictation::stop_global_hotkey_listener();
+
                     // Clean up database connection and checkpoint WAL
                     if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
                         log::info!("Starting database cleanup...");
