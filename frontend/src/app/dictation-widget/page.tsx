@@ -74,7 +74,7 @@ export default function DictationWidgetPage() {
       data-tauri-drag-region
     >
       <div
-        className="w-[392px] rounded-2xl border border-white/50 bg-white/90 backdrop-blur-xl shadow-[0_12px_38px_rgba(15,23,42,0.2)] px-4 py-3"
+        className="w-[392px] rounded-2xl border border-white/50 bg-white/90 backdrop-blur-xl shadow-[0_12px_38px_rgba(15,23,42,0.2)] px-4 py-3.5"
         style={DRAG_REGION_STYLE}
       >
         <div className="flex items-start justify-between gap-3">
@@ -94,7 +94,7 @@ export default function DictationWidgetPage() {
         </div>
 
         {payload.transcript && (
-          <p className="mt-2 text-[12px] text-slate-700 bg-slate-50 rounded-lg px-2.5 py-2 line-clamp-2">
+          <p className="mt-2 text-[12px] leading-5 text-slate-700 bg-slate-50 rounded-lg px-2.5 py-2 min-h-0 line-clamp-2 break-words">
             {payload.transcript}
           </p>
         )}

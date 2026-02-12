@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use regex::Regex;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
@@ -22,7 +23,7 @@ use core_graphics::event::{
 
 const DICTATION_WIDGET_LABEL: &str = "dictation-widget";
 const DICTATION_WIDGET_WIDTH: f64 = 400.0;
-const DICTATION_WIDGET_HEIGHT: f64 = 88.0;
+const DICTATION_WIDGET_HEIGHT: f64 = 128.0;
 const MAX_DICTATION_SECONDS: usize = 60;
 const DEFAULT_HOTKEY: &str = "fn+space";
 const DEBUG_EVENT_LIMIT: usize = 50;
@@ -724,6 +725,66 @@ fn normalize_and_extract_speech(captured: CapturedAudio) -> Vec<f32> {
     }
 }
 
+fn clean_qwen_asr_output(text: &str) -> String {
+    static LANGUAGE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?im)^\s*language\s+(?:",
+            r"English|Chinese|Japanese|Korean|French|German|Spanish|",
+            r"Portuguese|Russian|Italian|Dutch|Turkish|Arabic|Polish|",
+            r"Swedish|Norwegian|Danish|Finnish|Hungarian|Czech|Romanian|",
+            r"Bulgarian|Greek|Serbian|Croatian|Slovak|Slovenian|",
+            r"Ukrainian|Catalan|Vietnamese|Thai|Indonesian|Malay|",
+            r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
+            r"Cantonese|Yue|None|null",
+            r")[:：]?\s*"
+        ))
+        .expect("valid regex")
+    });
+    static LANGUAGE_SENTENCE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?i)([。！？.!?]\s*)language\s+(?:",
+            r"English|Chinese|Japanese|Korean|French|German|Spanish|",
+            r"Portuguese|Russian|Italian|Dutch|Turkish|Arabic|Polish|",
+            r"Swedish|Norwegian|Danish|Finnish|Hungarian|Czech|Romanian|",
+            r"Bulgarian|Greek|Serbian|Croatian|Slovak|Slovenian|",
+            r"Ukrainian|Catalan|Vietnamese|Thai|Indonesian|Malay|",
+            r"Hindi|Tamil|Telugu|Bengali|Urdu|Persian|Hebrew|",
+            r"Cantonese|Yue|None|null",
+            r")[:：]?\s*"
+        ))
+        .expect("valid regex")
+    });
+    static MULTISPACE_RE: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[ \t]{2,}").expect("valid regex"));
+
+    let mut cleaned = text.trim().to_string();
+    if cleaned.is_empty() {
+        return cleaned;
+    }
+
+    cleaned = LANGUAGE_PREFIX_RE.replace_all(&cleaned, "").into_owned();
+    loop {
+        let next = LANGUAGE_SENTENCE_PREFIX_RE
+            .replace_all(&cleaned, "$1")
+            .into_owned();
+        if next == cleaned {
+            break;
+        }
+        cleaned = next;
+    }
+    cleaned = MULTISPACE_RE.replace_all(&cleaned, " ").into_owned();
+    cleaned.trim().to_string()
+}
+
+fn normalize_transcript(provider: &str, text: &str) -> String {
+    let normalized = if provider == "qwenAsr" {
+        clean_qwen_asr_output(text)
+    } else {
+        text.to_string()
+    };
+    normalized.trim().to_string()
+}
+
 async fn transcribe_audio<R: Runtime>(app: &AppHandle<R>, samples_16k: Vec<f32>) -> Result<String, String> {
     crate::audio::transcription::engine::validate_transcription_model_ready(app).await?;
 
@@ -745,21 +806,28 @@ async fn transcribe_audio<R: Runtime>(app: &AppHandle<R>, samples_16k: Vec<f32>)
     };
 
     match result {
-        Ok(text) if !text.trim().is_empty() => Ok(text.trim().to_string()),
-        Ok(_) => Err("Transcription returned empty text".to_string()),
+        Ok(text) => {
+            let cleaned = normalize_transcript(provider, &text);
+            if !cleaned.is_empty() {
+                return Ok(cleaned);
+            }
+            Err("Transcription returned empty text".to_string())
+        }
         Err(primary_err) => {
             // Fallback sequence for robustness
             let fallback_qwen = crate::qwen_asr_engine::commands::qwen_asr_transcribe_audio(samples_16k.clone()).await;
             if let Ok(text) = fallback_qwen {
-                if !text.trim().is_empty() {
-                    return Ok(text.trim().to_string());
+                let cleaned = normalize_transcript("qwenAsr", &text);
+                if !cleaned.is_empty() {
+                    return Ok(cleaned);
                 }
             }
 
             let fallback_whisper = crate::whisper_engine::commands::whisper_transcribe_audio(samples_16k.clone()).await;
             if let Ok(text) = fallback_whisper {
-                if !text.trim().is_empty() {
-                    return Ok(text.trim().to_string());
+                let cleaned = normalize_transcript("localWhisper", &text);
+                if !cleaned.is_empty() {
+                    return Ok(cleaned);
                 }
             }
 
@@ -770,13 +838,21 @@ async fn transcribe_audio<R: Runtime>(app: &AppHandle<R>, samples_16k: Vec<f32>)
 
 #[cfg(target_os = "macos")]
 fn read_clipboard_text() -> Option<String> {
-    let output = Command::new("pbpaste").output().ok()?;
-    String::from_utf8(output.stdout).ok()
+    let output = Command::new("pbpaste")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_CTYPE", "UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[cfg(target_os = "macos")]
 fn write_clipboard_text(text: &str) -> Result<(), String> {
     let mut child = Command::new("pbcopy")
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_CTYPE", "UTF-8")
+        .env("LC_ALL", "en_US.UTF-8")
         .stdin(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start pbcopy: {e}"))?;
