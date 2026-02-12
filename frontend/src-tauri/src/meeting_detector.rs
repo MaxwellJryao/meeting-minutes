@@ -145,7 +145,7 @@ fn show_banner_window<R: Runtime>(app_handle: &AppHandle<R>, app_name: &str) {
     match WebviewWindowBuilder::new(app_handle, BANNER_WINDOW_LABEL, url)
         .title("Meeting Detected")
         .inner_size(BANNER_WIDTH, BANNER_HEIGHT)
-        .position(x, 12.0)
+        .position(x, 36.0)
         .resizable(false)
         .decorations(false)
         .transparent(true)

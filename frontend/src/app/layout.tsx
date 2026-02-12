@@ -105,7 +105,7 @@ export default function RootLayout({
   // Banner popup window: render children directly without providers/sidebar
   if (isBannerWindow) {
     return (
-      <html lang="en">
+      <html lang="en" style={{ background: 'transparent' }}>
         <body className={`${sourceSans3.variable} font-sans antialiased`} style={{ background: 'transparent' }}>
           {children}
         </body>

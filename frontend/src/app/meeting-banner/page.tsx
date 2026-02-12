@@ -32,7 +32,7 @@ function BannerContent() {
       data-tauri-drag-region
     >
       <div
-        className="flex items-center gap-3 bg-[#1a1a2e] text-white rounded-full pl-4 pr-2 py-2 shadow-2xl border border-white/10"
+        className="flex items-center gap-3 bg-[#1a1a2e] text-white rounded-full pl-4 pr-2 py-2 border border-white/10"
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
       >
         {/* App icon */}
