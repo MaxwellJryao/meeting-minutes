@@ -22,6 +22,23 @@ export interface TranscriptSettingsProps {
     onModelSelect?: () => void;
 }
 
+type LocalProvider = 'localWhisper' | 'parakeet' | 'qwenAsr';
+type CloudProvider = Exclude<TranscriptModelProps['provider'], LocalProvider>;
+
+const MODEL_OPTIONS: Record<TranscriptModelProps['provider'], string[]> = {
+    localWhisper: [],
+    parakeet: [],
+    qwenAsr: [],
+    deepgram: ['nova-2-phonecall'],
+    elevenLabs: ['eleven_multilingual_v2'],
+    groq: ['llama-3.3-70b-versatile'],
+    openai: ['gpt-4o-mini-transcribe', 'gpt-4o-transcribe', 'whisper-1'],
+};
+
+function isLocalProvider(provider: TranscriptModelProps['provider']): provider is LocalProvider {
+    return provider === 'localWhisper' || provider === 'parakeet' || provider === 'qwenAsr';
+}
+
 export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelConfig, onModelSelect }: TranscriptSettingsProps) {
     const [apiKey, setApiKey] = useState<string | null>(transcriptModelConfig.apiKey || null);
     const [showApiKey, setShowApiKey] = useState<boolean>(false);
@@ -35,32 +52,47 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     }, [transcriptModelConfig.provider]);
 
     useEffect(() => {
-        if (transcriptModelConfig.provider === 'localWhisper' || transcriptModelConfig.provider === 'parakeet' || transcriptModelConfig.provider === 'qwenAsr') {
+        if (isLocalProvider(uiProvider)) {
             setApiKey(null);
+            return;
         }
-    }, [transcriptModelConfig.provider]);
+        if (transcriptModelConfig.provider === uiProvider) {
+            setApiKey(transcriptModelConfig.apiKey || null);
+        }
+    }, [transcriptModelConfig.provider, transcriptModelConfig.apiKey, uiProvider]);
 
-    const fetchApiKey = async (provider: string) => {
+    const fetchApiKey = async (provider: CloudProvider): Promise<string | null> => {
         try {
-
             const data = await invoke('api_get_transcript_api_key', { provider }) as string;
-
-            setApiKey(data || '');
+            const normalized = data?.trim() ? data.trim() : null;
+            setApiKey(normalized);
+            return normalized;
         } catch (err) {
             console.error('Error fetching API key:', err);
             setApiKey(null);
+            return null;
         }
     };
-    const modelOptions = {
-        localWhisper: [], // Model selection handled by ModelManager component
-        parakeet: [], // Model selection handled by ParakeetModelManager component
-        qwenAsr: [], // Model selection handled by QwenAsrModelManager component
-        deepgram: ['nova-2-phonecall'],
-        elevenLabs: ['eleven_multilingual_v2'],
-        groq: ['llama-3.3-70b-versatile'],
-        openai: ['gpt-4o'],
+
+    const persistCloudConfig = async (provider: CloudProvider, model: string, key: string | null) => {
+        const normalizedKey = key?.trim() ? key.trim() : null;
+        await invoke('api_save_transcript_config', {
+            provider,
+            model,
+            apiKey: normalizedKey,
+        });
+        setTranscriptModelConfig({
+            provider,
+            model,
+            apiKey: normalizedKey,
+        });
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
+
+    const requiresApiKey = !isLocalProvider(uiProvider);
+    const cloudModelOptions = isLocalProvider(uiProvider) ? [] : MODEL_OPTIONS[uiProvider];
+    const selectedCloudModel = transcriptModelConfig.provider === uiProvider
+        ? transcriptModelConfig.model
+        : (cloudModelOptions[0] || '');
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
@@ -126,9 +158,29 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 onValueChange={(value) => {
                                     const provider = value as TranscriptModelProps['provider'];
                                     setUiProvider(provider);
-                                    if (provider !== 'localWhisper' && provider !== 'parakeet' && provider !== 'qwenAsr') {
-                                        fetchApiKey(provider);
+
+                                    if (isLocalProvider(provider)) {
+                                        setTranscriptModelConfig({
+                                            provider,
+                                            model: transcriptModelConfig.provider === provider ? transcriptModelConfig.model : '',
+                                            apiKey: null,
+                                        });
+                                        return;
                                     }
+
+                                    const initialModel =
+                                        transcriptModelConfig.provider === provider && transcriptModelConfig.model
+                                            ? transcriptModelConfig.model
+                                            : (MODEL_OPTIONS[provider][0] || '');
+
+                                    void (async () => {
+                                        try {
+                                            const existingApiKey = await fetchApiKey(provider);
+                                            await persistCloudConfig(provider, initialModel, existingApiKey);
+                                        } catch (err) {
+                                            console.error('Failed to persist transcript provider config:', err);
+                                        }
+                                    })();
                                 }}
                             >
                                 <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
@@ -141,23 +193,28 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
                                     <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
                                     <SelectItem value="groq">☁️ Groq</SelectItem>
-                                    <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
+                                    */}
+                                    <SelectItem value="openai">☁️ OpenAI</SelectItem>
                                 </SelectContent>
                             </Select>
 
-                            {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && uiProvider !== 'qwenAsr' && (
+                            {!isLocalProvider(uiProvider) && (
                                 <Select
-                                    value={transcriptModelConfig.model}
+                                    value={selectedCloudModel}
                                     onValueChange={(value) => {
-                                        const model = value as TranscriptModelProps['model'];
-                                        setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
+                                        const model = value as string;
+                                        const provider = uiProvider as CloudProvider;
+                                        setTranscriptModelConfig({ provider, model, apiKey });
+                                        void persistCloudConfig(provider, model, apiKey).catch((err) => {
+                                            console.error('Failed to save transcript model config:', err);
+                                        });
                                     }}
                                 >
                                     <SelectTrigger className='focus:ring-1 focus:ring-blue-500 focus:border-blue-500'>
                                         <SelectValue placeholder="Select model" />
                                     </SelectTrigger>
                                     <SelectContent>
-                                        {modelOptions[uiProvider].map((model) => (
+                                        {cloudModelOptions.map((model) => (
                                             <SelectItem key={model} value={model}>{model}</SelectItem>
                                         ))}
                                     </SelectContent>
@@ -208,7 +265,31 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     className={`pr-24 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 ${isApiKeyLocked ? 'bg-gray-100 cursor-not-allowed' : ''
                                         }`}
                                     value={apiKey || ''}
-                                    onChange={(e) => setApiKey(e.target.value)}
+                                    onChange={(e) => {
+                                        const nextApiKey = e.target.value;
+                                        setApiKey(nextApiKey);
+                                        if (!isLocalProvider(uiProvider)) {
+                                            setTranscriptModelConfig({
+                                                provider: uiProvider,
+                                                model: selectedCloudModel,
+                                                apiKey: nextApiKey,
+                                            });
+                                        }
+                                    }}
+                                    onBlur={() => {
+                                        if (!isLocalProvider(uiProvider)) {
+                                            void persistCloudConfig(uiProvider, selectedCloudModel, apiKey).catch((err) => {
+                                                console.error('Failed to save transcript API key:', err);
+                                            });
+                                        }
+                                    }}
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !isLocalProvider(uiProvider)) {
+                                            void persistCloudConfig(uiProvider, selectedCloudModel, apiKey).catch((err) => {
+                                                console.error('Failed to save transcript API key:', err);
+                                            });
+                                        }
+                                    }}
                                     disabled={isApiKeyLocked}
                                     onClick={handleInputClick}
                                     placeholder="Enter your API key"
