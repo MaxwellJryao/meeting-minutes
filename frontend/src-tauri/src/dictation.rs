@@ -4,7 +4,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audio::audio_processing::{audio_to_mono, resample_audio};
 use crate::audio::extract_speech_16k;
@@ -29,6 +29,8 @@ const DICTATION_WIDGET_LABEL: &str = "dictation-widget";
 const DICTATION_WIDGET_WIDTH: f64 = 400.0;
 const DICTATION_WIDGET_HEIGHT: f64 = 128.0;
 const MAX_DICTATION_SECONDS: usize = 60;
+const DICTATION_LOW_LATENCY_BUFFER_TARGET_FRAMES: u32 = 256;
+const DICTATION_CAPTURE_WARMUP_TIMEOUT_MS: u64 = 300;
 const DEFAULT_HOTKEY: &str = "fn+space";
 const DEBUG_EVENT_LIMIT: usize = 50;
 const KEY_RETURN: u16 = 0x24;
@@ -103,6 +105,7 @@ const KEY_F20: u16 = 0x5A;
 
 static DICTATION_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DICTATION_PROCESSING: AtomicBool = AtomicBool::new(false);
+static DICTATION_PREWARMING: AtomicBool = AtomicBool::new(false);
 static HOTKEY_HELD: AtomicBool = AtomicBool::new(false);
 static FN_HELD: AtomicBool = AtomicBool::new(false);
 static CMD_HELD: AtomicBool = AtomicBool::new(false);
@@ -713,6 +716,16 @@ fn push_audio_chunk(
     }
 }
 
+fn choose_dictation_buffer_size(supported: &cpal::SupportedStreamConfig) -> cpal::BufferSize {
+    match supported.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => {
+            let target = DICTATION_LOW_LATENCY_BUFFER_TARGET_FRAMES.clamp(*min, *max);
+            cpal::BufferSize::Fixed(target)
+        }
+        cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Default,
+    }
+}
+
 fn start_microphone_capture() -> Result<(), String> {
     let mut guard = ACTIVE_RECORDER
         .lock()
@@ -736,11 +749,13 @@ fn start_microphone_capture() -> Result<(), String> {
     let stream_config = cpal::StreamConfig {
         channels,
         sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
+        // Prefer a smaller buffer to reduce hotkey-to-capture latency.
+        buffer_size: choose_dictation_buffer_size(&supported),
     };
 
     let max_samples = (sample_rate as usize) * MAX_DICTATION_SECONDS;
     let shared_buffer = std::sync::Arc::new(StdMutex::new(Vec::<f32>::new()));
+    let first_callback_received = std::sync::Arc::new(AtomicBool::new(false));
 
     let err_fn = |err| {
         log::error!("Dictation microphone stream error: {err}");
@@ -749,10 +764,14 @@ fn start_microphone_capture() -> Result<(), String> {
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => {
             let shared = shared_buffer.clone();
+            let first_ready = first_callback_received.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        if !data.is_empty() {
+                            first_ready.store(true, Ordering::Relaxed);
+                        }
                         push_audio_chunk(&shared, data, channels, max_samples);
                     },
                     err_fn,
@@ -762,10 +781,14 @@ fn start_microphone_capture() -> Result<(), String> {
         }
         cpal::SampleFormat::I16 => {
             let shared = shared_buffer.clone();
+            let first_ready = first_callback_received.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                        if !data.is_empty() {
+                            first_ready.store(true, Ordering::Relaxed);
+                        }
                         let f32_data: Vec<f32> = data
                             .iter()
                             .map(|&sample| sample as f32 / i16::MAX as f32)
@@ -779,10 +802,14 @@ fn start_microphone_capture() -> Result<(), String> {
         }
         cpal::SampleFormat::U16 => {
             let shared = shared_buffer.clone();
+            let first_ready = first_callback_received.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[u16], _: &cpal::InputCallbackInfo| {
+                        if !data.is_empty() {
+                            first_ready.store(true, Ordering::Relaxed);
+                        }
                         let f32_data: Vec<f32> = data
                             .iter()
                             .map(|&sample| (sample as f32 / u16::MAX as f32) * 2.0 - 1.0)
@@ -796,10 +823,14 @@ fn start_microphone_capture() -> Result<(), String> {
         }
         cpal::SampleFormat::I32 => {
             let shared = shared_buffer.clone();
+            let first_ready = first_callback_received.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[i32], _: &cpal::InputCallbackInfo| {
+                        if !data.is_empty() {
+                            first_ready.store(true, Ordering::Relaxed);
+                        }
                         let f32_data: Vec<f32> = data
                             .iter()
                             .map(|&sample| sample as f32 / i32::MAX as f32)
@@ -813,10 +844,14 @@ fn start_microphone_capture() -> Result<(), String> {
         }
         cpal::SampleFormat::I8 => {
             let shared = shared_buffer.clone();
+            let first_ready = first_callback_received.clone();
             device
                 .build_input_stream(
                     &stream_config,
                     move |data: &[i8], _: &cpal::InputCallbackInfo| {
+                        if !data.is_empty() {
+                            first_ready.store(true, Ordering::Relaxed);
+                        }
                         let f32_data: Vec<f32> = data
                             .iter()
                             .map(|&sample| sample as f32 / i8::MAX as f32)
@@ -837,11 +872,30 @@ fn start_microphone_capture() -> Result<(), String> {
         .play()
         .map_err(|e| format!("Failed to start microphone stream: {e}"))?;
 
+    // Avoid showing "Listening" before the first audio callback arrives.
+    let warmup_deadline =
+        Instant::now() + Duration::from_millis(DICTATION_CAPTURE_WARMUP_TIMEOUT_MS);
+    while !first_callback_received.load(Ordering::Relaxed) && Instant::now() < warmup_deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
     *guard = Some(DictationRecorder {
         stream,
         sample_rate,
         buffer: shared_buffer,
     });
+
+    Ok(())
+}
+
+fn abort_microphone_capture() -> Result<(), String> {
+    let mut guard = ACTIVE_RECORDER
+        .lock()
+        .map_err(|e| format!("Failed to lock recorder state: {e}"))?;
+
+    if let Some(recorder) = guard.take() {
+        drop(recorder.stream);
+    }
 
     Ok(())
 }
@@ -877,8 +931,10 @@ fn normalize_and_extract_speech(captured: CapturedAudio) -> Vec<f32> {
         captured.samples
     };
 
+    // For push-to-talk dictation, preserve the full utterance to avoid clipping
+    // leading words. VAD is used only to detect true no-speech input.
     match extract_speech_16k(&audio_16k) {
-        Ok(speech) if !speech.is_empty() => speech,
+        Ok(speech) if speech.is_empty() => Vec::new(),
         _ => audio_16k,
     }
 }
@@ -1120,15 +1176,17 @@ pub async fn start_dictation<R: Runtime>(app: AppHandle<R>) -> Result<(), String
         return Ok(());
     }
 
-    ensure_widget_window(&app);
+    DICTATION_PREWARMING.store(false, Ordering::SeqCst);
 
     match start_microphone_capture() {
         Ok(_) => {
+            ensure_widget_window(&app);
             emit_widget_state(&app, "recording", "Listening... release hotkey to transcribe", None);
             Ok(())
         }
         Err(e) => {
             DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+            ensure_widget_window(&app);
             emit_widget_state(&app, "error", &e, None);
             hide_widget_after_delay(app, 1800);
             Err(e)
@@ -1142,12 +1200,44 @@ pub async fn stop_dictation<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
     }
 
     DICTATION_PROCESSING.store(true, Ordering::SeqCst);
+    DICTATION_PREWARMING.store(false, Ordering::SeqCst);
     emit_widget_state(&app, "processing", "Transcribing...", None);
 
     let captured = stop_microphone_capture()?;
     tauri::async_runtime::spawn(finish_dictation(app, captured));
 
     Ok(())
+}
+
+fn maybe_start_dictation_prewarm() {
+    if DICTATION_ACTIVE.load(Ordering::SeqCst) || DICTATION_PROCESSING.load(Ordering::SeqCst) {
+        return;
+    }
+
+    if DICTATION_PREWARMING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = start_microphone_capture() {
+            log::debug!("Dictation prewarm microphone start failed: {}", err);
+            DICTATION_PREWARMING.store(false, Ordering::SeqCst);
+        }
+    });
+}
+
+fn maybe_cancel_dictation_prewarm() {
+    if !DICTATION_PREWARMING.load(Ordering::SeqCst) || DICTATION_ACTIVE.load(Ordering::SeqCst) {
+        return;
+    }
+
+    DICTATION_PREWARMING.store(false, Ordering::SeqCst);
+    if let Err(err) = abort_microphone_capture() {
+        log::debug!("Dictation prewarm microphone abort failed: {}", err);
+    }
 }
 
 #[tauri::command]
@@ -1432,6 +1522,14 @@ pub async fn dictation_set_hotkey(hotkey: String) -> Result<SetHotkeyResponse, S
 #[cfg(target_os = "macos")]
 fn handle_hotkey_event<R: Runtime>(app: &AppHandle<R>, event_type: CGEventType, keycode: u16, flags: CGEventFlags, autorepeat: bool) {
     let cfg = hotkey_config_from_atoms();
+
+    if matches!(event_type, CGEventType::FlagsChanged) && !HOTKEY_HELD.load(Ordering::SeqCst) {
+        if modifiers_match(flags, &cfg) {
+            maybe_start_dictation_prewarm();
+        } else {
+            maybe_cancel_dictation_prewarm();
+        }
+    }
 
     // KeyUp should only check key code and held state.
     if matches!(event_type, CGEventType::KeyUp) && keycode == cfg.key_code {
