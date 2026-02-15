@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Switch } from '@/components/ui/switch';
-import { Bug, FolderOpen, Keyboard, RefreshCcw, RotateCcw, Trash2 } from 'lucide-react';
+import { FolderOpen, Keyboard, RotateCcw } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
 import Analytics from '@/lib/analytics';
@@ -19,46 +19,9 @@ interface RecordingSettingsProps {
   onSave?: (preferences: RecordingPreferences) => void;
 }
 
-interface DictationDebugEvent {
-  timestamp_ms: number;
-  event_type: string;
-  keycode: number;
-  expected_keycode: number;
-  key: string;
-  flags: string;
-  autorepeat: boolean;
-  matches_hotkey: boolean;
-  modifiers_ok: boolean;
-  consume_candidate: boolean;
-  hotkey_held_before: boolean;
-  hotkey_held_after: boolean;
-  action: string;
-}
-
-interface DictationDebugState {
-  listener_running: boolean;
-  listener_mode: string;
-  listener_last_error: string | null;
-  listener_started_at_ms: number | null;
-  event_count: number;
+interface DictationPermissionState {
   accessibility_granted: boolean;
   input_monitoring_granted: boolean;
-  current_hotkey: string;
-  current_keycode: number;
-  require_fn: boolean;
-  require_control: boolean;
-  require_command: boolean;
-  require_option: boolean;
-  require_shift: boolean;
-  dictation_active: boolean;
-  dictation_processing: boolean;
-  hotkey_held: boolean;
-  fn_held: boolean;
-  cmd_held: boolean;
-  ctrl_held: boolean;
-  alt_held: boolean;
-  shift_held: boolean;
-  events: DictationDebugEvent[];
 }
 
 const DEFAULT_DICTATION_HOTKEY = 'fn+space';
@@ -152,9 +115,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const [isSavingDictationHotkey, setIsSavingDictationHotkey] = useState(false);
   const [isCapturingDictationHotkey, setIsCapturingDictationHotkey] = useState(false);
   const [captureHint, setCaptureHint] = useState<string | null>(null);
-  const [dictationDebug, setDictationDebug] = useState<DictationDebugState | null>(null);
-  const [isLoadingDictationDebug, setIsLoadingDictationDebug] = useState(false);
-  const [dictationDebugError, setDictationDebugError] = useState<string | null>(null);
+  const [isMacOS, setIsMacOS] = useState<boolean | null>(null);
+  const [dictationPermissionState, setDictationPermissionState] = useState<DictationPermissionState | null>(null);
+  const [isCheckingDictationPermissions, setIsCheckingDictationPermissions] = useState(false);
   const captureBoxRef = useRef<HTMLDivElement | null>(null);
 
   // Load recording preferences on component mount
@@ -226,34 +189,107 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     loadDictationHotkey();
   }, []);
 
-  const loadDictationDebug = async () => {
-    setIsLoadingDictationDebug(true);
-    setDictationDebugError(null);
+  const detectIsMacOS = async (): Promise<boolean> => {
     try {
-      const state = await invoke<DictationDebugState>('dictation_get_debug_state');
-      setDictationDebug(state);
+      const { platform } = await import('@tauri-apps/plugin-os');
+      const mac = platform() === 'macos';
+      setIsMacOS(mac);
+      return mac;
     } catch (error) {
-      console.error('Failed to load dictation debug state:', error);
-      setDictationDebugError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setIsLoadingDictationDebug(false);
+      console.error('Failed to detect platform:', error);
+      setIsMacOS(false);
+      return false;
     }
   };
 
-  const handleClearDictationDebug = async () => {
+  const loadDictationPermissionState = async (): Promise<DictationPermissionState | null> => {
+    if (isMacOS !== true) {
+      setDictationPermissionState(null);
+      return null;
+    }
+
+    setIsCheckingDictationPermissions(true);
     try {
-      await invoke('dictation_clear_debug_events');
-      await loadDictationDebug();
-      toast.success('Dictation debug events cleared');
+      const [accessibility_granted, input_monitoring_granted] = await Promise.all([
+        invoke<boolean>('dictation_check_accessibility'),
+        invoke<boolean>('dictation_check_input_monitoring')
+      ]);
+      const state = { accessibility_granted, input_monitoring_granted };
+      setDictationPermissionState(state);
+      return state;
     } catch (error) {
-      console.error('Failed to clear dictation debug events:', error);
-      toast.error('Failed to clear dictation debug events');
+      console.error('Failed to check dictation permissions:', error);
+      return null;
+    } finally {
+      setIsCheckingDictationPermissions(false);
+    }
+  };
+
+  const requestAccessibilityPermission = async () => {
+    try {
+      const granted = await invoke<boolean>('dictation_request_accessibility');
+      if (granted) {
+        toast.success('Accessibility permission granted');
+        await invoke<string>('dictation_restart_listener');
+      } else {
+        toast.error('Accessibility permission is required for dictation hotkey');
+      }
+      await loadDictationPermissionState();
+    } catch (error) {
+      console.error('Failed to request accessibility permission:', error);
+      toast.error('Failed to request Accessibility permission');
     }
   };
 
   useEffect(() => {
-    loadDictationDebug();
+    detectIsMacOS();
   }, []);
+
+  useEffect(() => {
+    if (isMacOS) {
+      loadDictationPermissionState();
+    }
+  }, [isMacOS]);
+
+  const requestInputMonitoringPermission = async () => {
+    try {
+      const granted = await invoke<boolean>('dictation_request_input_monitoring');
+      if (granted) {
+        toast.success('Input Monitoring permission granted');
+        await invoke<string>('dictation_restart_listener');
+      } else {
+        toast.error('Input Monitoring permission is required for dictation hotkey');
+      }
+      await loadDictationPermissionState();
+    } catch (error) {
+      console.error('Failed to request Input Monitoring permission:', error);
+      toast.error('Failed to request Input Monitoring permission');
+    }
+  };
+
+  const ensureDictationPermissions = async (): Promise<boolean> => {
+    const macOS = isMacOS === null ? await detectIsMacOS() : isMacOS;
+    if (!macOS) {
+      return true;
+    }
+
+    const state = await loadDictationPermissionState();
+    if (!state) {
+      return false;
+    }
+
+    if (!state.accessibility_granted) {
+      await requestAccessibilityPermission();
+      return false;
+    }
+
+    if (!state.input_monitoring_granted) {
+      await requestInputMonitoringPermission();
+      return false;
+    }
+
+    return true;
+  };
 
   const handleAutoSaveToggle = async (enabled: boolean) => {
     const newPreferences = { ...preferences, auto_save: enabled };
@@ -337,7 +373,6 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       await Analytics.track('dictation_hotkey_updated', {
         hotkey: result.hotkey
       });
-      await loadDictationDebug();
     } catch (error) {
       console.error('Failed to update dictation hotkey:', error);
       toast.error('Failed to update dictation hotkey', {
@@ -359,10 +394,16 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
     }
   }, [isCapturingDictationHotkey]);
 
-  const handleStartHotkeyCapture = () => {
+  const handleStartHotkeyCapture = async () => {
     if (isSavingDictationHotkey) {
       return;
     }
+
+    const canCapture = await ensureDictationPermissions();
+    if (!canCapture) {
+      return;
+    }
+
     setCaptureHint(null);
     setIsCapturingDictationHotkey(true);
   };
@@ -437,12 +478,11 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
       </div>
     );
   }
-
-  const formatDebugTime = (timestampMs: number) => {
-    const date = new Date(timestampMs);
-    const milliseconds = `${date.getMilliseconds()}`.padStart(3, '0');
-    return `${date.toLocaleTimeString('zh-CN', { hour12: false })}.${milliseconds}`;
-  };
+  const missingAccessibility =
+    isMacOS && dictationPermissionState && !dictationPermissionState.accessibility_granted;
+  const missingInputMonitoring =
+    isMacOS && dictationPermissionState && !dictationPermissionState.input_monitoring_granted;
+  const showDictationPermissionNotice = Boolean(missingAccessibility || missingInputMonitoring);
 
   return (
     <div className="space-y-6">
@@ -581,138 +621,43 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </Button>
         </div>
 
-        <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 p-3 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
-              <Bug className="h-4 w-4" />
-              Dictation Debug
+        {showDictationPermissionNotice && (
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 space-y-3">
+            <p className="text-sm text-red-700">
+              Dictation hotkey needs macOS permissions before it can work.
+            </p>
+            <div className="text-xs text-red-700 space-y-1">
+              {missingAccessibility && (
+                <p>Accessibility permission is missing.</p>
+              )}
+              {missingInputMonitoring && (
+                <p>Input Monitoring permission is missing.</p>
+              )}
             </div>
             <div className="flex gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={loadDictationDebug}
-                disabled={isLoadingDictationDebug}
-              >
-                <RefreshCcw className="h-4 w-4" />
-                Refresh
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleClearDictationDebug}
-                disabled={isLoadingDictationDebug}
-              >
-                <Trash2 className="h-4 w-4" />
-                Clear
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={async () => {
-                  try {
-                    const mode = await invoke<string>('dictation_restart_listener');
-                    toast.success(`Listener restarted: ${mode}`);
-                    loadDictationDebug();
-                  } catch (e) {
-                    toast.error(`Restart failed: ${e}`);
-                  }
-                }}
-              >
-                <RotateCcw className="h-4 w-4" />
-                Restart Listener
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={async () => {
-                  try {
-                    await invoke<boolean>('dictation_request_input_monitoring');
-                    toast.success('Input Monitoring permission prompt requested');
-                    loadDictationDebug();
-                  } catch (e) {
-                    toast.error(`Input Monitoring request failed: ${e}`);
-                  }
-                }}
-              >
-                <Keyboard className="h-4 w-4" />
-                Request Input Monitoring
-              </Button>
+              {missingAccessibility && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={requestAccessibilityPermission}
+                  disabled={isCheckingDictationPermissions}
+                >
+                  Grant Accessibility
+                </Button>
+              )}
+              {missingInputMonitoring && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={requestInputMonitoringPermission}
+                  disabled={isCheckingDictationPermissions}
+                >
+                  Grant Input Monitoring
+                </Button>
+              )}
             </div>
           </div>
-
-          {dictationDebugError && (
-            <p className="text-xs text-red-600">{dictationDebugError}</p>
-          )}
-
-          {!dictationDebugError && !dictationDebug && (
-            <p className="text-xs text-slate-600">
-              {isLoadingDictationDebug ? 'Loading debug state...' : 'No debug data'}
-            </p>
-          )}
-
-          {dictationDebug && (
-            <div className="space-y-2 text-xs text-slate-700">
-              <div>
-                listener: <span className="font-mono">{dictationDebug.listener_running ? 'running' : 'stopped'}</span>
-                {' | '}mode: <span className="font-mono">{dictationDebug.listener_mode}</span>
-                {' | '}event_count: <span className="font-mono">{dictationDebug.event_count}</span>
-              </div>
-              <div>
-                accessibility: <span className={`font-mono font-semibold ${dictationDebug.accessibility_granted ? 'text-green-600' : 'text-red-600'}`}>
-                  {dictationDebug.accessibility_granted ? 'granted' : 'NOT granted'}
-                </span>
-                {!dictationDebug.accessibility_granted && (
-                  <span className="text-red-600 ml-2">
-                    (System Settings &gt; Privacy &amp; Security &gt; Accessibility — add this app, then click "Restart Listener")
-                  </span>
-                )}
-              </div>
-              <div>
-                input_monitoring: <span className={`font-mono font-semibold ${dictationDebug.input_monitoring_granted ? 'text-green-600' : 'text-red-600'}`}>
-                  {dictationDebug.input_monitoring_granted ? 'granted' : 'NOT granted'}
-                </span>
-                {!dictationDebug.input_monitoring_granted && (
-                  <span className="text-red-600 ml-2">
-                    (System Settings &gt; Privacy &amp; Security &gt; Input Monitoring — add this app, then click "Restart Listener")
-                  </span>
-                )}
-              </div>
-              <div>
-                hotkey: <span className="font-mono">{dictationDebug.current_hotkey}</span>
-                {' | '}keycode: <span className="font-mono">{dictationDebug.current_keycode}</span>
-              </div>
-              <div>
-                held: <span className="font-mono">hotkey={String(dictationDebug.hotkey_held)}</span>
-                {' '}<span className="font-mono">fn={String(dictationDebug.fn_held)}</span>
-                {' '}<span className="font-mono">cmd={String(dictationDebug.cmd_held)}</span>
-                {' '}<span className="font-mono">ctrl={String(dictationDebug.ctrl_held)}</span>
-                {' '}<span className="font-mono">opt={String(dictationDebug.alt_held)}</span>
-                {' '}<span className="font-mono">shift={String(dictationDebug.shift_held)}</span>
-              </div>
-              {dictationDebug.listener_last_error && (
-                <div className="text-red-600">
-                  last_error: <span className="font-mono">{dictationDebug.listener_last_error}</span>
-                </div>
-              )}
-
-              <div className="max-h-48 overflow-auto rounded border bg-white p-2 font-mono text-[11px] leading-5">
-                {dictationDebug.events.length === 0 ? (
-                  <div className="text-slate-500">No hotkey events captured yet.</div>
-                ) : (
-                  dictationDebug.events
-                    .slice()
-                    .reverse()
-                    .map((event, index) => (
-                      <div key={`${event.timestamp_ms}-${index}`} className="whitespace-nowrap">
-                        {formatDebugTime(event.timestamp_ms)} {event.event_type} key={event.key}({event.keycode}{event.keycode !== event.expected_keycode ? `!=expect:${event.expected_keycode}` : '=OK'}) flags={event.flags} mods={String(event.modifiers_ok)} match={String(event.matches_hotkey)} consume={String(event.consume_candidate)} held={String(event.hotkey_held_before)}-&gt;{String(event.hotkey_held_after)} action={event.action}
-                      </div>
-                    ))
-                )}
-              </div>
-            </div>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Device Preferences */}

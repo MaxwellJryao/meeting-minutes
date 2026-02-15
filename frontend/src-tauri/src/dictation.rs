@@ -10,6 +10,10 @@ use crate::audio::audio_processing::{audio_to_mono, resample_audio};
 use crate::audio::extract_speech_16k;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+#[cfg(target_os = "macos")]
+use tauri_plugin_notification::NotificationExt;
 
 #[cfg(target_os = "macos")]
 use core_foundation::base::TCFType;
@@ -111,6 +115,14 @@ static HOTKEY_REQUIRE_CONTROL: AtomicBool = AtomicBool::new(false);
 static HOTKEY_REQUIRE_COMMAND: AtomicBool = AtomicBool::new(false);
 static HOTKEY_REQUIRE_OPTION: AtomicBool = AtomicBool::new(false);
 static HOTKEY_REQUIRE_SHIFT: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static ACCESSIBILITY_PROMPTED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static INPUT_MONITORING_PROMPTED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static DICTATION_PERMISSION_WARNING_NOTIFIED_THIS_SESSION: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "macos")]
+static DICTATION_PERMISSION_WARNING_DIALOG_SHOWN_THIS_SESSION: AtomicBool = AtomicBool::new(false);
 
 static LAST_TRANSCRIPT: LazyLock<StdMutex<Option<String>>> = LazyLock::new(|| StdMutex::new(None));
 static HOTKEY_CONFIG: LazyLock<StdMutex<DictationHotkeyConfig>> =
@@ -270,6 +282,152 @@ fn check_input_monitoring_permission() -> bool {
         fn CGPreflightListenEventAccess() -> bool;
     }
     unsafe { CGPreflightListenEventAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn request_accessibility_permission_internal() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGRequestPostEventAccess() -> bool;
+    }
+    unsafe { CGRequestPostEventAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn request_input_monitoring_permission_internal() -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGRequestListenEventAccess() -> bool;
+    }
+    unsafe { CGRequestListenEventAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn notify_dictation_permission_warning<R: Runtime>(
+    app: &AppHandle<R>,
+    accessibility_granted: bool,
+    input_monitoring_granted: bool,
+) {
+    if DICTATION_PERMISSION_WARNING_NOTIFIED_THIS_SESSION.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let mut missing = Vec::new();
+    if !accessibility_granted {
+        missing.push("Accessibility");
+    }
+    if !input_monitoring_granted {
+        missing.push("Input Monitoring");
+    }
+    if missing.is_empty() {
+        return;
+    }
+
+    let body = format!(
+        "Dictation hotkey is disabled until {} permission is granted. Open System Settings > Privacy & Security, grant access, then restart listener.",
+        missing.join(" and ")
+    );
+
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("Dictation permission required")
+        .body(&body)
+        .show()
+    {
+        log::warn!("Failed to show dictation permission notification: {}", e);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_macos_privacy_settings(preference_pane: &str) {
+    let url = format!(
+        "x-apple.systempreferences:com.apple.preference.security?{}",
+        preference_pane
+    );
+    if let Err(e) = Command::new("open").arg(&url).spawn() {
+        log::warn!("Failed to open System Settings for {}: {}", preference_pane, e);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn show_dictation_permission_dialog<R: Runtime>(
+    app: &AppHandle<R>,
+    accessibility_granted: bool,
+    input_monitoring_granted: bool,
+) {
+    if DICTATION_PERMISSION_WARNING_DIALOG_SHOWN_THIS_SESSION.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let mut missing = Vec::new();
+    if !accessibility_granted {
+        missing.push("Accessibility");
+    }
+    if !input_monitoring_granted {
+        missing.push("Input Monitoring");
+    }
+    if missing.is_empty() {
+        return;
+    }
+
+    let preferred_pane = if !accessibility_granted {
+        "Privacy_Accessibility"
+    } else {
+        "Privacy_ListenEvent"
+    };
+
+    let body = format!(
+        "Dictation hotkey cannot start because {} permission is missing.\n\nClick \"Open Settings\" to grant access in System Settings > Privacy & Security.",
+        missing.join(" and ")
+    );
+
+    app.dialog()
+        .message(body)
+        .title("Dictation Permission Required")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Open Settings".to_string(),
+            "Later".to_string(),
+        ))
+        .show(move |open_settings| {
+            if open_settings {
+                open_macos_privacy_settings(preferred_pane);
+            }
+        });
+}
+
+#[cfg(target_os = "macos")]
+fn maybe_prompt_missing_dictation_permissions<R: Runtime>(app: &AppHandle<R>) {
+    let mut accessibility_granted = check_accessibility_permission();
+    let mut input_monitoring_granted = check_input_monitoring_permission();
+
+    if !accessibility_granted
+        && !ACCESSIBILITY_PROMPTED_THIS_SESSION.swap(true, Ordering::SeqCst)
+    {
+        let granted = request_accessibility_permission_internal();
+        log::info!(
+            "Dictation auto-request Accessibility permission result: {}",
+            granted
+        );
+        accessibility_granted = check_accessibility_permission();
+    }
+
+    if !input_monitoring_granted
+        && !INPUT_MONITORING_PROMPTED_THIS_SESSION.swap(true, Ordering::SeqCst)
+    {
+        let granted = request_input_monitoring_permission_internal();
+        log::info!(
+            "Dictation auto-request Input Monitoring permission result: {}",
+            granted
+        );
+        input_monitoring_granted = check_input_monitoring_permission();
+    }
+
+    if !accessibility_granted || !input_monitoring_granted {
+        show_dictation_permission_dialog(app, accessibility_granted, input_monitoring_granted);
+        notify_dictation_permission_warning(app, accessibility_granted, input_monitoring_granted);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1109,12 +1267,7 @@ pub async fn dictation_check_input_monitoring() -> Result<bool, String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn dictation_request_accessibility() -> Result<bool, String> {
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGRequestPostEventAccess() -> bool;
-    }
-    let granted = unsafe { CGRequestPostEventAccess() };
-    Ok(granted)
+    Ok(request_accessibility_permission_internal())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1127,12 +1280,7 @@ pub async fn dictation_request_accessibility() -> Result<bool, String> {
 #[cfg(target_os = "macos")]
 #[tauri::command]
 pub async fn dictation_request_input_monitoring() -> Result<bool, String> {
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGRequestListenEventAccess() -> bool;
-    }
-    let granted = unsafe { CGRequestListenEventAccess() };
-    Ok(granted)
+    Ok(request_input_monitoring_permission_internal())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1375,6 +1523,7 @@ pub fn start_global_hotkey_listener<R: Runtime>(app: &AppHandle<R>) -> Result<()
     }
 
     set_listener_debug_state(false, "starting", None);
+    maybe_prompt_missing_dictation_permissions(app);
 
     let app_handle = app.clone();
     let (tx, rx) =
