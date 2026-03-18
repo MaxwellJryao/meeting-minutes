@@ -61,37 +61,37 @@ pub async fn validate_transcription_model_ready<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<(), String> {
     // Check transcript configuration to determine which engine to validate
-    let config =
-        match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
-            .await
-        {
-            Ok(Some(config)) => {
-                info!(
-                    "📝 Found transcript config - provider: {}, model: {}",
-                    config.provider, config.model
-                );
-                config
+    let config = match crate::api::api::api_get_transcript_config(
+        app.clone(),
+        app.clone().state(),
+        None,
+    )
+    .await
+    {
+        Ok(Some(config)) => {
+            info!(
+                "📝 Found transcript config - provider: {}, model: {}",
+                config.provider, config.model
+            );
+            config
+        }
+        Ok(None) => {
+            info!("📝 No transcript config found, defaulting to parakeet");
+            crate::api::api::TranscriptConfig {
+                provider: "parakeet".to_string(),
+                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                api_key: None,
             }
-            Ok(None) => {
-                info!("📝 No transcript config found, defaulting to parakeet");
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: "parakeet-tdt-0.6b-v3-int8".to_string(),
-                    api_key: None,
-                }
+        }
+        Err(e) => {
+            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
+            crate::api::api::TranscriptConfig {
+                provider: "parakeet".to_string(),
+                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                api_key: None,
             }
-            Err(e) => {
-                warn!(
-                    "⚠️ Failed to get transcript config: {}, defaulting to parakeet",
-                    e
-                );
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: "parakeet-tdt-0.6b-v3-int8".to_string(),
-                    api_key: None,
-                }
-            }
-        };
+        }
+    };
 
     // Validate based on provider
     match config.provider.as_str() {
@@ -217,37 +217,37 @@ pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<TranscriptionEngine, String> {
     // Get provider configuration from API
-    let config =
-        match crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None)
-            .await
-        {
-            Ok(Some(config)) => {
-                info!(
-                    "📝 Transcript config - provider: {}, model: {}",
-                    config.provider, config.model
-                );
-                config
+    let config = match crate::api::api::api_get_transcript_config(
+        app.clone(),
+        app.clone().state(),
+        None,
+    )
+    .await
+    {
+        Ok(Some(config)) => {
+            info!(
+                "📝 Transcript config - provider: {}, model: {}",
+                config.provider, config.model
+            );
+            config
+        }
+        Ok(None) => {
+            info!("📝 No transcript config found, defaulting to parakeet");
+            crate::api::api::TranscriptConfig {
+                provider: "parakeet".to_string(),
+                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                api_key: None,
             }
-            Ok(None) => {
-                info!("📝 No transcript config found, defaulting to parakeet");
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: "parakeet-tdt-0.6b-v3-int8".to_string(),
-                    api_key: None,
-                }
+        }
+        Err(e) => {
+            warn!("⚠️ Failed to get transcript config: {}, defaulting to parakeet", e);
+            crate::api::api::TranscriptConfig {
+                provider: "parakeet".to_string(),
+                model: crate::config::DEFAULT_PARAKEET_MODEL.to_string(),
+                api_key: None,
             }
-            Err(e) => {
-                warn!(
-                    "⚠️ Failed to get transcript config: {}, defaulting to parakeet",
-                    e
-                );
-                crate::api::api::TranscriptConfig {
-                    provider: "parakeet".to_string(),
-                    model: "parakeet-tdt-0.6b-v3-int8".to_string(),
-                    api_key: None,
-                }
-            }
-        };
+        }
+    };
 
     // Initialize the appropriate engine based on provider
     match config.provider.as_str() {
